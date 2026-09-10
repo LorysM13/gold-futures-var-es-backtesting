@@ -1,0 +1,1697 @@
+# ============================================================
+# Prerequis
+# ============================================================
+include gig.gfn
+
+#Forward fill
+series AdjClose = ok(AdjClose) ? AdjClose : AdjClose(-1)
+
+#Return calculation
+series Return = diff(log(AdjClose))
+
+#Loss calculation
+series Loss = -Return
+
+# ============================================================
+# Rolling window
+# ============================================================
+
+matrix alphas = {1, 5, 10}
+scalar n = cols(alphas)
+
+loop j = 1..n --quiet  #Boucle pour parcourir les 3 seuils
+    
+    #Creation dynamique de nom de variable (chaque passage de la boucle cree une variable selon le seuil etudie)
+    scalar alpha = alphas[j]
+    string varname_var = sprintf("VaR_HS_%d", alpha)
+    string varname_es = sprintf("ES_HS_%d", alpha)
+    
+    #Allocation NA par defaut
+    series @varname_var = NA #Caractere @ permet de convertir string en variable
+    series @varname_es = NA
+    
+    loop i = 501..750 --quiet
+        scalar start_date = i - 250
+        scalar end_date = i - 1
+        
+        #Reduction de la taille de l'echantillon a la fenetre actuelle
+        smpl start_date end_date --quiet
+        
+        #Calcul de la VAR t+1
+        scalar treshold = 1 - (alpha / 100) #Division par 100 car alpha pas decimaux
+        scalar VAR = quantile(Loss, treshold)
+        
+        #Calcul ES
+        series extr_losses = (Loss > VAR) ? Loss : NA #Serie regroupant les obs supperieures a VAR sinon NA
+        scalar ES = mean(extr_losses)
+        
+        smpl full --quiet
+        
+        @varname_var[i] = VAR # Caractere @ permet de convertir string en variable
+        @varname_es[i] = ES
+        
+    endloop
+endloop
+
+#BackTesting rolling window
+smpl 501 750
+
+# Definition variable binaire si hit (hit = 1 sinon 0)
+series Hit_1_rw = (Loss > VaR_HS_1)
+series Hit_5_rw = (Loss > VaR_HS_5)
+series Hit_10_rw = (Loss > VaR_HS_10)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_1_rw = sum(Hit_1_rw)
+scalar nb_hits_5_rw = sum(Hit_5_rw)
+scalar nb_hits_10_rw = sum(Hit_10_rw)
+
+# Parametres
+scalar N = $nobs # nombre obs hors echantillon (250)
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+# Calcul du taux empirique (nbr de hit sur nbr obs)
+scalar p_hat_1_rw = nb_hits_1_rw / N
+scalar p_hat_5_rw = nb_hits_5_rw / N
+scalar p_hat_10_rw = nb_hits_10_rw / N
+
+# Calcul de la statistique LR
+scalar LR_uc_1_rw = -2 * ln(((1-p_1)^(N-nb_hits_1_rw) * p_1^nb_hits_1_rw) / ((1-p_hat_1_rw)^(N-nb_hits_1_rw) * p_hat_1_rw^nb_hits_1_rw))
+scalar LR_uc_5_rw = -2 * ln(((1-p_5)^(N-nb_hits_5_rw) * p_5^nb_hits_5_rw) / ((1-p_hat_5_rw)^(N-nb_hits_5_rw) * p_hat_5_rw^nb_hits_5_rw))
+scalar LR_uc_10_rw = -2 * ln(((1-p_10)^(N-nb_hits_10_rw) * p_10^nb_hits_10_rw) / ((1-p_hat_10_rw)^(N-nb_hits_10_rw) * p_hat_10_rw^nb_hits_10_rw))
+
+# Calcul de la p-value du test de Kupiec
+scalar p_value_kupiec_1_rw = 1 - cdf(c, 1, LR_uc_1_rw)
+scalar p_value_kupiec_5_rw = 1 - cdf(c, 1, LR_uc_5_rw)
+scalar p_value_kupiec_10_rw = 1 - cdf(c, 1, LR_uc_10_rw)
+
+# Creation tableau de resultat
+matrix Tab_Backtest_HS = { 1, nb_hits_1_rw, p_hat_1_rw, p_value_kupiec_1_rw ; 
+                           5, nb_hits_5_rw, p_hat_5_rw, p_value_kupiec_5_rw ; 
+                           10, nb_hits_10_rw, p_hat_10_rw, p_value_kupiec_10_rw }
+
+# Modification noms colonnes / lignes
+rownames(Tab_Backtest_HS, "HS_1% HS_5% HS_10%")
+colnames(Tab_Backtest_HS, "Alpha #hits Taux_hits p-value")
+print "--- Résultats backtesting (Simulation historique) ---"
+print Tab_Backtest_HS
+
+#Calcul de l'ES effectif
+smpl 501 750 --quiet
+#ES observe moyen
+scalar ES_obs_1_rw = mean((Loss > VaR_HS_1) ? Loss : NA)
+scalar ES_obs_5_rw = mean((Loss > VaR_HS_5) ? Loss : NA)
+scalar ES_obs_10_rw = mean((Loss > VaR_HS_10) ? Loss : NA)
+
+# ES predit moyen
+scalar ES_pred_1_rw = mean(ES_HS_1)
+scalar ES_pred_5_rw = mean(ES_HS_5)
+scalar ES_pred_10_rw = mean(ES_HS_10)
+
+matrix Tab_ES_HS = { 1, ES_obs_1_rw, ES_pred_1_rw ;
+                     5, ES_obs_5_rw, ES_pred_5_rw ;
+                     10, ES_obs_10_rw, ES_pred_10_rw }
+
+rownames(Tab_ES_HS, "HS_1% HS_5% HS_10%")
+colnames(Tab_ES_HS, "Alpha ES_observe ES_predit")
+print "--- Diagnostic ES : Pertes observees en queue vs ES predites ---"
+print Tab_ES_HS
+                       
+smpl full
+
+#=== Robustesse ===
+scalar N_sub = 125
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+#=== Sous-periode 1 (501 - 625) ===
+smpl 501 625 --quiet
+
+# Variable binaire si hit
+series Hit_P1_1_rw = (Loss > VaR_HS_1)
+series Hit_P1_5_rw = (Loss > VaR_HS_5)
+series Hit_P1_10_rw = (Loss > VaR_HS_10)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P1_1_rw = sum(Hit_P1_1_rw)
+scalar nb_hits_P1_5_rw = sum(Hit_P1_5_rw)
+scalar nb_hits_P1_10_rw = sum(Hit_P1_10_rw)
+
+# Taux empirique
+scalar p_hat_P1_1_rw = nb_hits_P1_1_rw / N_sub
+scalar p_hat_P1_5_rw = nb_hits_P1_5_rw / N_sub
+scalar p_hat_P1_10_rw = nb_hits_P1_10_rw / N_sub
+
+# Calcul LR et p-value pour P1
+scalar LR_P1_1_rw = -2 * ln(((1-p_1)^(N_sub-nb_hits_P1_1_rw) * p_1^nb_hits_P1_1_rw) / ((1-p_hat_P1_1_rw)^(N_sub-nb_hits_P1_1_rw) * p_hat_P1_1_rw^nb_hits_P1_1_rw))
+scalar LR_P1_5_rw = -2 * ln(((1-p_5)^(N_sub-nb_hits_P1_5_rw) * p_5^nb_hits_P1_5_rw) / ((1-p_hat_P1_5_rw)^(N_sub-nb_hits_P1_5_rw) * p_hat_P1_5_rw^nb_hits_P1_5_rw))
+scalar LR_P1_10_rw = -2 * ln(((1-p_10)^(N_sub-nb_hits_P1_10_rw) * p_10^nb_hits_P1_10_rw) / ((1-p_hat_P1_10_rw)^(N_sub-nb_hits_P1_10_rw) * p_hat_P1_10_rw^nb_hits_P1_10_rw))
+
+scalar p_val_P1_1_rw = 1 - cdf(c, 1, LR_P1_1_rw)
+scalar p_val_P1_5_rw = 1 - cdf(c, 1, LR_P1_5_rw)
+scalar p_val_P1_10_rw = 1 - cdf(c, 1, LR_P1_10_rw)
+
+# === Sous-periode 2 (626 - 750) ===
+
+smpl 626 750 --quiet
+
+# Variable binaire si hit
+series Hit_P2_1_rw = (Loss > VaR_HS_1)
+series Hit_P2_5_rw = (Loss > VaR_HS_5)
+series Hit_P2_10_rw = (Loss > VaR_HS_10)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P2_1_rw = sum(Hit_P2_1_rw)
+scalar nb_hits_P2_5_rw = sum(Hit_P2_5_rw)
+scalar nb_hits_P2_10_rw = sum(Hit_P2_10_rw)
+
+# Taux empirique
+scalar p_hat_P2_1_rw = nb_hits_P2_1_rw / N_sub
+scalar p_hat_P2_5_rw = nb_hits_P2_5_rw / N_sub
+scalar p_hat_P2_10_rw = nb_hits_P2_10_rw / N_sub
+
+# Calcul LR et p-value pour P2
+scalar LR_P2_1_rw = -2 * ln(((1-p_1)^(N_sub-nb_hits_P2_1_rw) * p_1^nb_hits_P2_1_rw) / ((1-p_hat_P2_1_rw)^(N_sub-nb_hits_P2_1_rw) * p_hat_P2_1_rw^nb_hits_P2_1_rw))
+scalar LR_P2_5_rw = -2 * ln(((1-p_5)^(N_sub-nb_hits_P2_5_rw) * p_5^nb_hits_P2_5_rw) / ((1-p_hat_P2_5_rw)^(N_sub-nb_hits_P2_5_rw) * p_hat_P2_5_rw^nb_hits_P2_5_rw))
+scalar LR_P2_10_rw = -2 * ln(((1-p_10)^(N_sub-nb_hits_P2_10_rw) * p_10^nb_hits_P2_10_rw) / ((1-p_hat_P2_10_rw)^(N_sub-nb_hits_P2_10_rw) * p_hat_P2_10_rw^nb_hits_P2_10_rw))
+
+scalar p_val_P2_1_rw = 1 - cdf(c, 1, LR_P2_1_rw)
+scalar p_val_P2_5_rw = 1 - cdf(c, 1, LR_P2_5_rw)
+scalar p_val_P2_10_rw = 1 - cdf(c, 1, LR_P2_10_rw)
+
+# === Affichage des tableaux de résultats ===
+
+matrix Tab_P1_rw = { 1, nb_hits_P1_1_rw, p_hat_P1_1_rw, p_val_P1_1_rw ;
+                  5, nb_hits_P1_5_rw, p_hat_P1_5_rw, p_val_P1_5_rw ;
+                 10, nb_hits_P1_10_rw, p_hat_P1_10_rw, p_val_P1_10_rw }
+
+matrix Tab_P2_rw = { 1, nb_hits_P2_1_rw, p_hat_P2_1_rw, p_val_P2_1_rw ;
+                  5, nb_hits_P2_5_rw, p_hat_P2_5_rw, p_val_P2_5_rw ;
+                 10, nb_hits_P2_10_rw, p_hat_P2_10_rw, p_val_P2_10_rw }
+
+# Mise en page
+rownames(Tab_P1_rw, "RW_1% RW_5% RW_10%")
+colnames(Tab_P1_rw, "Alpha #hits Taux_hits p-value")
+rownames(Tab_P2_rw, "RW_1% RW_5% RW_10%")
+colnames(Tab_P2_rw, "Alpha #hits Taux_hits p-value")
+
+print "--- ROBUSTESSE : Période 1 (Jours 501 à 625) ---"
+print Tab_P1_rw
+
+print "--- ROBUSTESSE : Période 2 (Jours 626 à 750) ---"
+print Tab_P2_rw
+
+smpl full
+
+# ============================================================
+# EWMA calculation
+# ============================================================
+
+scalar lam = 0.94
+series sigma2 = NA
+
+#Calcul de la variance initiale sur base de tout l'echantillon
+smpl 1 500 --quiet
+scalar initial_sigma = var(Return)
+smpl full
+
+sigma2[1] = initial_sigma
+
+#Pour chaque observation, on essaye de predire la prochaine variance
+loop i = 2..750 --quiet
+    sigma2[i] = lam * sigma2[i-1] + (1-lam) * (Return[i-1]^2)
+endloop
+
+series sigma = sqrt(sigma2)  
+
+#Calcul de la VAR pour les differents seuils
+matrix alphas = {1, 5, 10}
+scalar n = cols(alphas)
+
+loop j = 1..n --quiet
+    
+    #Creation dynamique de nom de variable (chaque passage de la boucle cree une variable selon le seuil etudie)
+    scalar alpha = alphas[j]
+    string varname_var = sprintf("VaR_EWMA_%d", alpha)
+    string varname_es = sprintf("ES_EWMA_%d", alpha)
+    
+    #Allocation NA par defaut
+    series @varname_var = NA
+    series @varname_es = NA
+    
+    #Calcul z score pour calculer VAR
+    scalar treshold = 1 - (alpha / 100)
+    scalar Z = invcdf(z, treshold)
+    
+    @varname_var = (sigma * Z) #On suppose le fait stylise que moyenne rendements = 0 (comme cours)
+    
+    #Calcul de ES
+    smpl full --quiet
+    #Estimation ES sur base fenetre historique de 250j
+    loop i = 501..750 --quiet
+        
+        #Definition de la fenetre
+        smpl (i-250) (i-1) --quiet
+        
+        #Verification pertes superieures a VAR
+        series pertes_queue = (Loss > @varname_var[i]) ? Loss : NA
+        
+        # L'ES du jour i est la moyenne de ces pertes de la fenetre
+        @varname_es[i] = mean(pertes_queue)
+    endloop
+   
+    smpl full --quiet
+       
+endloop
+
+
+#BackTesting EWMA
+smpl 501 750 --quiet
+
+# Definition variable binaire si hit (hit = 1 sinon 0)
+series Hit_1_ewma = (Loss > VaR_EWMA_1)
+series Hit_5_ewma = (Loss > VaR_EWMA_5)
+series Hit_10_ewma = (Loss > VaR_EWMA_10)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_1_ewma = sum(Hit_1_ewma)
+scalar nb_hits_5_ewma = sum(Hit_5_ewma)
+scalar nb_hits_10_ewma = sum(Hit_10_ewma)
+
+# Parametres
+scalar N = $nobs # nombre obs hors echantillon (250)
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+# Calcul du taux empirique (nbr de hit sur nbr obs)
+scalar p_hat_1_ewma = nb_hits_1_ewma / N
+scalar p_hat_5_ewma = nb_hits_5_ewma / N
+scalar p_hat_10_ewma = nb_hits_10_ewma / N
+
+# Calcul de la statistique LR
+scalar LR_uc_1_ewma = -2 * ln(((1-p_1)^(N-nb_hits_1_ewma) * p_1^nb_hits_1_ewma) / ((1-p_hat_1_ewma)^(N-nb_hits_1_ewma) * p_hat_1_ewma^nb_hits_1_ewma))
+scalar LR_uc_5_ewma = -2 * ln(((1-p_5)^(N-nb_hits_5_ewma) * p_5^nb_hits_5_ewma) / ((1-p_hat_5_ewma)^(N-nb_hits_5_ewma) * p_hat_5_ewma^nb_hits_5_ewma))
+scalar LR_uc_10_ewma = -2 * ln(((1-p_10)^(N-nb_hits_10_ewma) * p_10^nb_hits_10_ewma) / ((1-p_hat_10_ewma)^(N-nb_hits_10_ewma) * p_hat_10_ewma^nb_hits_10_ewma))
+
+# Calcul de la p-value du test de Kupiec
+scalar p_value_kupiec_1_ewma = 1 - cdf(c, 1, LR_uc_1_ewma)
+scalar p_value_kupiec_5_ewma = 1 - cdf(c, 1, LR_uc_5_ewma)
+scalar p_value_kupiec_10_ewma = 1 - cdf(c, 1, LR_uc_10_ewma)
+
+# Creation tableau de resultat
+matrix Tab_Backtest_EWMA = { 1, nb_hits_1_ewma, p_hat_1_ewma, p_value_kupiec_1_ewma ; 
+                           5, nb_hits_5_ewma, p_hat_5_ewma, p_value_kupiec_5_ewma ; 
+                           10, nb_hits_10_ewma, p_hat_10_ewma, p_value_kupiec_10_ewma }
+
+# Modification noms colonnes / lignes
+rownames(Tab_Backtest_EWMA, "EWMA_1% EWMA_5% EMWA_10%")
+colnames(Tab_Backtest_EWMA, "Alpha #hits Taux_hits p-value")
+print "--- Résultats backtesting (EWMA) ---"
+print Tab_Backtest_EWMA
+
+#Calcul de l'ES effectif
+smpl 501 750 --quiet
+#ES observe moyen
+scalar ES_obs_1_ewma = mean((Loss > VaR_EWMA_1) ? Loss : NA)
+scalar ES_obs_5_ewma = mean((Loss > VaR_EWMA_5) ? Loss : NA)
+scalar ES_obs_10_ewma = mean((Loss > VaR_EWMA_10) ? Loss : NA)
+
+# ES predit moyen
+scalar ES_pred_1_ewma = mean(ES_EWMA_1)
+scalar ES_pred_5_ewma = mean(ES_EWMA_5)
+scalar ES_pred_10_ewma = mean(ES_EWMA_10)
+
+matrix Tab_ES_EWMA = { 1, ES_obs_1_ewma, ES_pred_1_ewma ;
+                     5, ES_obs_5_ewma, ES_pred_5_ewma ;
+                     10, ES_obs_10_ewma, ES_pred_10_ewma }
+
+rownames(Tab_ES_EWMA, "EWMA_1% EWMA_5% EWMA_10%")
+colnames(Tab_ES_EWMA, "Alpha ES_observe ES_predit")
+print "--- Diagnostic ES : Pertes observees en queue vs ES predites ---"
+print Tab_ES_EWMA
+                       
+smpl full
+
+#Robustesse 
+scalar N_sub = 125
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+#=== Sous-periode 1 (501 - 625) ===
+smpl 501 625 --quiet
+
+# Variable binaire si hit
+series Hit_P1_1_ewma = (Loss > VaR_EWMA_1)
+series Hit_P1_5_ewma = (Loss > VaR_EWMA_5)
+series Hit_P1_10_ewma = (Loss > VaR_EWMA_10)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P1_1_ewma = sum(Hit_P1_1_ewma)
+scalar nb_hits_P1_5_ewma = sum(Hit_P1_5_ewma)
+scalar nb_hits_P1_10_ewma = sum(Hit_P1_10_ewma)
+
+# Taux empirique
+scalar p_hat_P1_1_ewma = nb_hits_P1_1_ewma / N_sub
+scalar p_hat_P1_5_ewma = nb_hits_P1_5_ewma / N_sub
+scalar p_hat_P1_10_ewma = nb_hits_P1_10_ewma / N_sub
+
+# Calcul LR et p-value pour P1
+scalar LR_P1_1_ewma = -2 * ln(((1-p_1)^(N_sub-nb_hits_P1_1_ewma) * p_1^nb_hits_P1_1_ewma) / ((1-p_hat_P1_1_ewma)^(N_sub-nb_hits_P1_1_ewma) * p_hat_P1_1_ewma^nb_hits_P1_1_ewma))
+scalar LR_P1_5_ewma = -2 * ln(((1-p_5)^(N_sub-nb_hits_P1_5_ewma) * p_5^nb_hits_P1_5_ewma) / ((1-p_hat_P1_5_ewma)^(N_sub-nb_hits_P1_5_ewma) * p_hat_P1_5_ewma^nb_hits_P1_5_ewma))
+scalar LR_P1_10_ewma = -2 * ln(((1-p_10)^(N_sub-nb_hits_P1_10_ewma) * p_10^nb_hits_P1_10_ewma) / ((1-p_hat_P1_10_ewma)^(N_sub-nb_hits_P1_10_ewma) * p_hat_P1_10_ewma^nb_hits_P1_10_ewma))
+
+scalar p_val_P1_1_ewma = 1 - cdf(c, 1, LR_P1_1_ewma)
+scalar p_val_P1_5_ewma = 1 - cdf(c, 1, LR_P1_5_ewma)
+scalar p_val_P1_10_ewma = 1 - cdf(c, 1, LR_P1_10_ewma)
+
+# === Sous-periode 2 (626 - 750) ===
+
+smpl 626 750 --quiet
+
+# Variable binaire si hit
+series Hit_P2_1_ewma = (Loss > VaR_EWMA_1)
+series Hit_P2_5_ewma = (Loss > VaR_EWMA_5)
+series Hit_P2_10_ewma = (Loss > VaR_EWMA_10)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P2_1_ewma = sum(Hit_P2_1_ewma)
+scalar nb_hits_P2_5_ewma = sum(Hit_P2_5_ewma)
+scalar nb_hits_P2_10_ewma = sum(Hit_P2_10_ewma)
+
+# Taux empirique
+scalar p_hat_P2_1_ewma = nb_hits_P2_1_ewma / N_sub
+scalar p_hat_P2_5_ewma = nb_hits_P2_5_ewma / N_sub
+scalar p_hat_P2_10_ewma = nb_hits_P2_10_ewma / N_sub
+
+# Calcul LR et p-value pour P2
+scalar LR_P2_1_ewma = -2 * ln(((1-p_1)^(N_sub-nb_hits_P2_1_ewma) * p_1^nb_hits_P2_1_ewma) / ((1-p_hat_P2_1_ewma)^(N_sub-nb_hits_P2_1_ewma) * p_hat_P2_1_ewma^nb_hits_P2_1_ewma))
+scalar LR_P2_5_ewma = -2 * ln(((1-p_5)^(N_sub-nb_hits_P2_5_ewma) * p_5^nb_hits_P2_5_ewma) / ((1-p_hat_P2_5_ewma)^(N_sub-nb_hits_P2_5_ewma) * p_hat_P2_5_ewma^nb_hits_P2_5_ewma))
+scalar LR_P2_10_ewma = -2 * ln(((1-p_10)^(N_sub-nb_hits_P2_10_ewma) * p_10^nb_hits_P2_10_ewma) / ((1-p_hat_P2_10_ewma)^(N_sub-nb_hits_P2_10_ewma) * p_hat_P2_10_ewma^nb_hits_P2_10_ewma))
+
+scalar p_val_P2_1_ewma = 1 - cdf(c, 1, LR_P2_1_ewma)
+scalar p_val_P2_5_ewma = 1 - cdf(c, 1, LR_P2_5_ewma)
+scalar p_val_P2_10_ewma = 1 - cdf(c, 1, LR_P2_10_ewma)
+
+# === Affichage des tableaux de résultats ===
+
+matrix Tab_P1 = { 1, nb_hits_P1_1_ewma, p_hat_P1_1_ewma, p_val_P1_1_ewma ;
+                  5, nb_hits_P1_5_ewma, p_hat_P1_5_ewma, p_val_P1_5_ewma ;
+                 10, nb_hits_P1_10_ewma, p_hat_P1_10_ewma, p_val_P1_10_ewma }
+
+matrix Tab_P2 = { 1, nb_hits_P2_1_ewma, p_hat_P2_1_ewma, p_val_P2_1_ewma ;
+                  5, nb_hits_P2_5_ewma, p_hat_P2_5_ewma, p_val_P2_5_ewma ;
+                 10, nb_hits_P2_10_ewma, p_hat_P2_10_ewma, p_val_P2_10_ewma }
+
+# Mise en page
+rownames(Tab_P1, "EWMA_1% EWMA_5% EWMA_10%")
+colnames(Tab_P1, "Alpha #hits Taux_hits p-value")
+rownames(Tab_P2, "EWMA_1% EWMA_5% EWMA_10%")
+colnames(Tab_P2, "Alpha #hits Taux_hits p-value")
+
+print "--- ROBUSTESSE : Période 1 (Jours 501 à 625) ---"
+print Tab_P1
+
+print "--- ROBUSTESSE : Période 2 (Jours 626 à 750) ---"
+print Tab_P2
+
+smpl full
+ 
+# ============================================================
+# ARCH(1)
+# ============================================================
+smpl 1 500 --quiet
+garch 0 2 ; Return --quiet
+print $coeff
+scalar mu = $coeff[1]
+scalar omega = $coeff[2]
+scalar alpha1 = $coeff[3]
+scalar alpha2 = $coeff[4]
+
+smpl full
+series var_cond_arch = $h #Recuperation var cond du GARCH
+series ets_arch = Return - mu #Calcul des residus
+
+loop i = 501..750 --quiet
+   var_cond_arch[i] = omega + alpha1 * ets_arch[i-1]^2 + alpha2 * ets_arch[i-2]^2
+endloop  
+
+#Calcul des VAR
+smpl 501 750 --quiet
+
+series sigma_arch = sqrt(var_cond_arch)
+
+#Recuperation des quantiles
+scalar z_1 = invcdf(z, 0.99)   
+scalar z_5 = invcdf(z, 0.95)   
+scalar z_10 = invcdf(z, 0.90) 
+
+series VaR_arch_1pct  = -mu + z_1 * sigma_arch
+series VaR_arch_5pct  = -mu + z_5 * sigma_arch
+series VaR_arch_10pct = -mu + z_10 * sigma_arch
+
+#Calcul prediction ES
+series ES_arch_1pct = NA #Intialisation des series a vide
+series ES_arch_5pct = NA
+series ES_arch_10pct = NA
+
+smpl full 
+
+loop i = 501..750 --quiet
+    #Estimation ES sur base fenetre de 250j
+    smpl (i-250) (i-1) --quiet
+    series pertes_queue_1 = (Loss > VaR_arch_1pct[i]) ? Loss : NA #On garde les pertes plus hautes que le seuil
+    ES_arch_1pct[i] = mean(pertes_queue_1)
+    
+    series pertes_queue_5 = (Loss > VaR_arch_5pct[i]) ? Loss : NA
+    ES_arch_5pct[i] = mean(pertes_queue_5)
+    
+    series pertes_queue_10 = (Loss > VaR_arch_10pct[i]) ? Loss : NA
+    ES_arch_10pct[i] = mean(pertes_queue_10)
+    
+endloop
+
+#BackTesting ARCH
+smpl 501 750 --quiet
+
+# Definition variable binaire si hit (hit = 1 sinon 0)
+series Hit_1_arch = (Loss > VaR_arch_1pct)
+series Hit_5_arch = (Loss > VaR_arch_5pct)
+series Hit_10_arch = (Loss > VaR_arch_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_1_arch = sum(Hit_1_arch)
+scalar nb_hits_5_arch = sum(Hit_5_arch)
+scalar nb_hits_10_arch = sum(Hit_10_arch)
+
+# Parametres
+scalar N = $nobs # nombre obs hors echantillon (250)
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+# Calcul du taux empirique (nbr de hit sur nbr obs)
+scalar p_hat_1_arch = nb_hits_1_arch / N
+scalar p_hat_5_arch = nb_hits_5_arch / N
+scalar p_hat_10_arch = nb_hits_10_arch / N
+
+# Calcul de la statistique LR
+scalar LR_uc_1_arch = -2 * ln(((1-p_1)^(N-nb_hits_1_arch) * p_1^nb_hits_1_arch) / ((1-p_hat_1_arch)^(N-nb_hits_1_arch) * p_hat_1_arch^nb_hits_1_arch))
+scalar LR_uc_5_arch = -2 * ln(((1-p_5)^(N-nb_hits_5_arch) * p_5^nb_hits_5_arch) / ((1-p_hat_5_arch)^(N-nb_hits_5_arch) * p_hat_5_arch^nb_hits_5_arch))
+scalar LR_uc_10_arch = -2 * ln(((1-p_10)^(N-nb_hits_10_arch) * p_10^nb_hits_10_arch) / ((1-p_hat_10_arch)^(N-nb_hits_10_arch) * p_hat_10_arch^nb_hits_10_arch))
+
+# Calcul de la p-value du test de Kupiec
+scalar p_value_kupiec_1_arch = 1 - cdf(c, 1, LR_uc_1_arch)
+scalar p_value_kupiec_5_arch = 1 - cdf(c, 1, LR_uc_5_arch)
+scalar p_value_kupiec_10_arch = 1 - cdf(c, 1, LR_uc_10_arch)
+
+# Creation tableau de resultat
+matrix Tab_Backtest_ARCH = { 1, nb_hits_1_arch, p_hat_1_arch, p_value_kupiec_1_arch ; 
+                           5, nb_hits_5_arch, p_hat_5_arch, p_value_kupiec_5_arch ; 
+                           10, nb_hits_10_arch, p_hat_10_arch, p_value_kupiec_10_arch }
+
+# Modification noms colonnes / lignes
+rownames(Tab_Backtest_ARCH, "ARCH_1% ARCH_5% ARCH_10%")
+colnames(Tab_Backtest_ARCH, "Alpha #hits Taux_hits p-value")
+print "--- Résultats backtesting (ARCH(2)) ---"
+print Tab_Backtest_ARCH
+
+#Calcul de l'ES effectif
+smpl 501 750 --quiet
+#ES observe moyen
+scalar ES_obs_1_arch = mean((Loss > VaR_arch_1pct) ? Loss : NA)
+scalar ES_obs_5_arch = mean((Loss > VaR_arch_5pct) ? Loss : NA)
+scalar ES_obs_10_arch = mean((Loss > VaR_arch_10pct) ? Loss : NA)
+
+# ES predit moyen
+scalar ES_pred_1_arch = mean(ES_arch_1pct)
+scalar ES_pred_5_arch = mean(ES_arch_5pct)
+scalar ES_pred_10_arch = mean(ES_arch_10pct)
+
+matrix Tab_ES_ARCH = { 1, ES_obs_1_arch, ES_pred_1_arch ;
+                     5, ES_obs_5_arch, ES_pred_5_arch ;
+                     10, ES_obs_10_arch, ES_pred_10_arch }
+
+rownames(Tab_ES_ARCH, "ARCH_1% ARCH_5% ARCH_10%")
+colnames(Tab_ES_ARCH, "Alpha ES_observe ES_predit")
+print "--- Diagnostic ES : Pertes observees en queue vs ES predites ---"
+print Tab_ES_ARCH
+                        
+smpl full
+
+# === Robustesse ARCH ===
+scalar N_sub = 125
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+# === Sous-periode 1 (501 - 625) ===
+smpl 501 625 --quiet
+
+# Variable binaire si hit
+series Hit_P1_1_arch = (Loss > VaR_arch_1pct)
+series Hit_P1_5_arch = (Loss > VaR_arch_5pct)
+series Hit_P1_10_arch = (Loss > VaR_arch_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P1_1_arch = sum(Hit_P1_1_arch)
+scalar nb_hits_P1_5_arch = sum(Hit_P1_5_arch)
+scalar nb_hits_P1_10_arch = sum(Hit_P1_10_arch)
+
+# Taux empirique
+scalar p_hat_P1_1_arch = nb_hits_P1_1_arch / N_sub
+scalar p_hat_P1_5_arch = nb_hits_P1_5_arch / N_sub
+scalar p_hat_P1_10_arch = nb_hits_P1_10_arch / N_sub
+
+# Calcul LR et p-value pour P1
+scalar LR_P1_1_arch = -2 * ln(((1-p_1)^(N_sub-nb_hits_P1_1_arch) * p_1^nb_hits_P1_1_arch) / ((1-p_hat_P1_1_arch)^(N_sub-nb_hits_P1_1_arch) * p_hat_P1_1_arch^nb_hits_P1_1_arch))
+scalar LR_P1_5_arch = -2 * ln(((1-p_5)^(N_sub-nb_hits_P1_5_arch) * p_5^nb_hits_P1_5_arch) / ((1-p_hat_P1_5_arch)^(N_sub-nb_hits_P1_5_arch) * p_hat_P1_5_arch^nb_hits_P1_5_arch))
+scalar LR_P1_10_arch = -2 * ln(((1-p_10)^(N_sub-nb_hits_P1_10_arch) * p_10^nb_hits_P1_10_arch) / ((1-p_hat_P1_10_arch)^(N_sub-nb_hits_P1_10_arch) * p_hat_P1_10_arch^nb_hits_P1_10_arch))
+
+scalar p_val_P1_1_arch = 1 - cdf(c, 1, LR_P1_1_arch)
+scalar p_val_P1_5_arch = 1 - cdf(c, 1, LR_P1_5_arch)
+scalar p_val_P1_10_arch = 1 - cdf(c, 1, LR_P1_10_arch)
+
+# === Sous-periode 2 (626 - 750) ===
+
+smpl 626 750 --quiet
+
+# Variable binaire si hit
+series Hit_P2_1_arch = (Loss > VaR_arch_1pct)
+series Hit_P2_5_arch = (Loss > VaR_arch_5pct)
+series Hit_P2_10_arch = (Loss > VaR_arch_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P2_1_arch = sum(Hit_P2_1_arch)
+scalar nb_hits_P2_5_arch = sum(Hit_P2_5_arch)
+scalar nb_hits_P2_10_arch = sum(Hit_P2_10_arch)
+
+# Taux empirique
+scalar p_hat_P2_1_arch = nb_hits_P2_1_arch / N_sub
+scalar p_hat_P2_5_arch = nb_hits_P2_5_arch / N_sub
+scalar p_hat_P2_10_arch = nb_hits_P2_10_arch / N_sub
+
+# Calcul LR et p-value pour P2
+scalar LR_P2_1_arch = -2 * ln(((1-p_1)^(N_sub-nb_hits_P2_1_arch) * p_1^nb_hits_P2_1_arch) / ((1-p_hat_P2_1_arch)^(N_sub-nb_hits_P2_1_arch) * p_hat_P2_1_arch^nb_hits_P2_1_arch))
+scalar LR_P2_5_arch = -2 * ln(((1-p_5)^(N_sub-nb_hits_P2_5_arch) * p_5^nb_hits_P2_5_arch) / ((1-p_hat_P2_5_arch)^(N_sub-nb_hits_P2_5_arch) * p_hat_P2_5_arch^nb_hits_P2_5_arch))
+scalar LR_P2_10_arch = -2 * ln(((1-p_10)^(N_sub-nb_hits_P2_10_arch) * p_10^nb_hits_P2_10_arch) / ((1-p_hat_P2_10_arch)^(N_sub-nb_hits_P2_10_arch) * p_hat_P2_10_arch^nb_hits_P2_10_arch))
+
+scalar p_val_P2_1_arch = 1 - cdf(c, 1, LR_P2_1_arch)
+scalar p_val_P2_5_arch = 1 - cdf(c, 1, LR_P2_5_arch)
+scalar p_val_P2_10_arch = 1 - cdf(c, 1, LR_P2_10_arch)
+
+# === Affichage des tableaux de résultats ===
+
+matrix Tab_P1_arch = { 1, nb_hits_P1_1_arch, p_hat_P1_1_arch, p_val_P1_1_arch ;
+                       5, nb_hits_P1_5_arch, p_hat_P1_5_arch, p_val_P1_5_arch ;
+                      10, nb_hits_P1_10_arch, p_hat_P1_10_arch, p_val_P1_10_arch }
+
+matrix Tab_P2_arch = { 1, nb_hits_P2_1_arch, p_hat_P2_1_arch, p_val_P2_1_arch ;
+                       5, nb_hits_P2_5_arch, p_hat_P2_5_arch, p_val_P2_5_arch ;
+                      10, nb_hits_P2_10_arch, p_hat_P2_10_arch, p_val_P2_10_arch }
+
+# Mise en page
+rownames(Tab_P1_arch, "ARCH_1% ARCH_5% ARCH_10%")
+colnames(Tab_P1_arch, "Alpha #hits Taux_hits p-value")
+rownames(Tab_P2_arch, "ARCH_1% ARCH_5% ARCH_10%")
+colnames(Tab_P2_arch, "Alpha #hits Taux_hits p-value")
+
+print "--- ROBUSTESSE ARCH : Période 1 (Jours 501 à 625) ---"
+print Tab_P1_arch
+
+print "--- ROBUSTESSE ARCH : Période 2 (Jours 626 à 750) ---"
+print Tab_P2_arch
+
+smpl full
+
+# ============================================================
+# GARCH(1 1)
+# ============================================================
+#Estimation du GARCH sur l'echantillon
+smpl 1 500 --quiet
+garch 1 1 ; Return --quiet
+
+#Recuperation coefficients estimes
+scalar mu = $coeff[1]
+scalar omega = $coeff[2]
+scalar alpha = $coeff[3]
+scalar beta = $coeff[4]
+
+smpl full
+series var_cond_garch = $h #Recuperation var cond du GARCH
+series ets_garch = Return - mu #Calcul des residus
+
+#Prediction de la variance conditionnelle hors sample
+loop i = 501..750 --quiet
+   var_cond_garch[i] = omega + alpha * ets_garch[i-1]^2 + beta * var_cond_garch[i-1]
+endloop  
+
+#Calcul des VAR
+smpl 501 750 --quiet
+
+series sigma_garch = sqrt(var_cond_garch)
+
+#Recuperation des quantiles
+scalar z_1 = invcdf(z, 0.99)   
+scalar z_5 = invcdf(z, 0.95)   
+scalar z_10 = invcdf(z, 0.90) 
+
+series VaR_garch_1pct  = -mu + z_1 * sigma_garch
+series VaR_garch_5pct  = -mu + z_5 * sigma_garch
+series VaR_garch_10pct = -mu + z_10 * sigma_garch
+
+#Calcul prediction ES
+series ES_garch_1pct = NA #Intialisation des series a vide
+series ES_garch_5pct = NA
+series ES_garch_10pct = NA
+
+smpl full 
+
+loop i = 501..750
+    #Estimation ES sur base fenetre de 250j
+    smpl (i-250) (i-1) --quiet
+    series pertes_queue_1 = (Loss > VaR_garch_1pct[i]) ? Loss : NA #On garde les pertes plus hautes que le seuil
+    ES_garch_1pct[i] = mean(pertes_queue_1)
+    
+    series pertes_queue_5 = (Loss > VaR_garch_5pct[i]) ? Loss : NA
+    ES_garch_5pct[i] = mean(pertes_queue_5)
+    
+    series pertes_queue_10 = (Loss > VaR_garch_10pct[i]) ? Loss : NA
+    ES_garch_10pct[i] = mean(pertes_queue_10)
+    
+endloop
+
+#BackTesting GARCH
+smpl 501 750 --quiet
+
+# Definition variable binaire si hit (hit = 1 sinon 0)
+series Hit_1_garch = (Loss > VaR_garch_1pct)
+series Hit_5_garch = (Loss > VaR_garch_5pct)
+series Hit_10_garch = (Loss > VaR_garch_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_1_garch = sum(Hit_1_garch)
+scalar nb_hits_5_garch = sum(Hit_5_garch)
+scalar nb_hits_10_garch = sum(Hit_10_garch)
+
+# Parametres
+scalar N = $nobs # nombre obs hors echantillon (250)
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+# Calcul du taux empirique (nbr de hit sur nbr obs)
+scalar p_hat_1_garch = nb_hits_1_garch / N
+scalar p_hat_5_garch = nb_hits_5_garch / N
+scalar p_hat_10_garch = nb_hits_10_garch / N
+
+# Calcul de la statistique LR
+scalar LR_uc_1_garch = -2 * ln(((1-p_1)^(N-nb_hits_1_garch) * p_1^nb_hits_1_garch) / ((1-p_hat_1_garch)^(N-nb_hits_1_garch) * p_hat_1_garch^nb_hits_1_garch))
+scalar LR_uc_5_garch = -2 * ln(((1-p_5)^(N-nb_hits_5_garch) * p_5^nb_hits_5_garch) / ((1-p_hat_5_garch)^(N-nb_hits_5_garch) * p_hat_5_garch^nb_hits_5_garch))
+scalar LR_uc_10_garch = -2 * ln(((1-p_10)^(N-nb_hits_10_garch) * p_10^nb_hits_10_garch) / ((1-p_hat_10_garch)^(N-nb_hits_10_garch) * p_hat_10_garch^nb_hits_10_garch))
+
+# Calcul de la p-value du test de Kupiec
+scalar p_value_kupiec_1_garch = 1 - cdf(c, 1, LR_uc_1_garch)
+scalar p_value_kupiec_5_garch = 1 - cdf(c, 1, LR_uc_5_garch)
+scalar p_value_kupiec_10_garch = 1 - cdf(c, 1, LR_uc_10_garch)
+
+# Creation tableau de resultat
+matrix Tab_Backtest_GARCH = { 1, nb_hits_1_garch, p_hat_1_garch, p_value_kupiec_1_garch ; 
+                           5, nb_hits_5_garch, p_hat_5_garch, p_value_kupiec_5_garch ; 
+                           10, nb_hits_10_garch, p_hat_10_garch, p_value_kupiec_10_garch }
+
+# Modification noms colonnes / lignes
+rownames(Tab_Backtest_GARCH, "GARCH_1% GARCH_5% GARCH_10%")
+colnames(Tab_Backtest_GARCH, "Alpha #hits Taux_hits p-value")
+print "--- Résultats backtesting (GARCH(1,1)) ---"
+print Tab_Backtest_GARCH
+
+#Calcul de l'ES effectif
+smpl 501 750 --quiet
+#ES observe moyen
+scalar ES_obs_1_garch = mean((Loss > VaR_garch_1pct) ? Loss : NA)
+scalar ES_obs_5_garch = mean((Loss > VaR_garch_5pct) ? Loss : NA)
+scalar ES_obs_10_garch = mean((Loss > VaR_garch_10pct) ? Loss : NA)
+
+# ES predit moyen
+scalar ES_pred_1_garch = mean(ES_garch_1pct)
+scalar ES_pred_5_garch = mean(ES_garch_5pct)
+scalar ES_pred_10_garch = mean(ES_garch_10pct)
+
+matrix Tab_ES_GARCH = { 1, ES_obs_1_garch, ES_pred_1_garch ;
+                     5, ES_obs_5_garch, ES_pred_5_garch ;
+                     10, ES_obs_10_garch, ES_pred_10_garch }
+
+rownames(Tab_ES_GARCH, "GARCH_1% GARCH_5% GARCH_10%")
+colnames(Tab_ES_GARCH, "Alpha ES_observe ES_predit")
+print "--- Diagnostic ES : Pertes observees en queue vs ES predites ---"
+print Tab_ES_GARCH
+                       
+smpl full 
+
+# === Robustesse GARCH(1,1) ===
+scalar N_sub = 125
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+# === Sous-periode 1 (501 - 625) ===
+
+smpl 501 625 --quiet
+
+# Variable binaire si hit
+series Hit_P1_1_garch = (Loss > VaR_garch_1pct)
+series Hit_P1_5_garch = (Loss > VaR_garch_5pct)
+series Hit_P1_10_garch = (Loss > VaR_garch_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P1_1_garch = sum(Hit_P1_1_garch)
+scalar nb_hits_P1_5_garch = sum(Hit_P1_5_garch)
+scalar nb_hits_P1_10_garch = sum(Hit_P1_10_garch)
+
+# Taux empirique
+scalar p_hat_P1_1_garch = nb_hits_P1_1_garch / N_sub
+scalar p_hat_P1_5_garch = nb_hits_P1_5_garch / N_sub
+scalar p_hat_P1_10_garch = nb_hits_P1_10_garch / N_sub
+
+# Calcul LR et p-value pour P1
+scalar LR_P1_1_garch = -2 * ln(((1-p_1)^(N_sub-nb_hits_P1_1_garch) * p_1^nb_hits_P1_1_garch) / ((1-p_hat_P1_1_garch)^(N_sub-nb_hits_P1_1_garch) * p_hat_P1_1_garch^nb_hits_P1_1_garch))
+scalar LR_P1_5_garch = -2 * ln(((1-p_5)^(N_sub-nb_hits_P1_5_garch) * p_5^nb_hits_P1_5_garch) / ((1-p_hat_P1_5_garch)^(N_sub-nb_hits_P1_5_garch) * p_hat_P1_5_garch^nb_hits_P1_5_garch))
+scalar LR_P1_10_garch = -2 * ln(((1-p_10)^(N_sub-nb_hits_P1_10_garch) * p_10^nb_hits_P1_10_garch) / ((1-p_hat_P1_10_garch)^(N_sub-nb_hits_P1_10_garch) * p_hat_P1_10_garch^nb_hits_P1_10_garch))
+
+scalar p_val_P1_1_garch = 1 - cdf(c, 1, LR_P1_1_garch)
+scalar p_val_P1_5_garch = 1 - cdf(c, 1, LR_P1_5_garch)
+scalar p_val_P1_10_garch = 1 - cdf(c, 1, LR_P1_10_garch)
+
+
+# === Sous-periode 2 (626 - 750) ===
+
+smpl 626 750 --quiet
+
+# Variable binaire si hit
+series Hit_P2_1_garch = (Loss > VaR_garch_1pct)
+series Hit_P2_5_garch = (Loss > VaR_garch_5pct)
+series Hit_P2_10_garch = (Loss > VaR_garch_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P2_1_garch = sum(Hit_P2_1_garch)
+scalar nb_hits_P2_5_garch = sum(Hit_P2_5_garch)
+scalar nb_hits_P2_10_garch = sum(Hit_P2_10_garch)
+
+# Taux empirique
+scalar p_hat_P2_1_garch = nb_hits_P2_1_garch / N_sub
+scalar p_hat_P2_5_garch = nb_hits_P2_5_garch / N_sub
+scalar p_hat_P2_10_garch = nb_hits_P2_10_garch / N_sub
+
+# Calcul LR et p-value pour P2
+scalar LR_P2_1_garch = -2 * ln(((1-p_1)^(N_sub-nb_hits_P2_1_garch) * p_1^nb_hits_P2_1_garch) / ((1-p_hat_P2_1_garch)^(N_sub-nb_hits_P2_1_garch) * p_hat_P2_1_garch^nb_hits_P2_1_garch))
+scalar LR_P2_5_garch = -2 * ln(((1-p_5)^(N_sub-nb_hits_P2_5_garch) * p_5^nb_hits_P2_5_garch) / ((1-p_hat_P2_5_garch)^(N_sub-nb_hits_P2_5_garch) * p_hat_P2_5_garch^nb_hits_P2_5_garch))
+scalar LR_P2_10_garch = -2 * ln(((1-p_10)^(N_sub-nb_hits_P2_10_garch) * p_10^nb_hits_P2_10_garch) / ((1-p_hat_P2_10_garch)^(N_sub-nb_hits_P2_10_garch) * p_hat_P2_10_garch^nb_hits_P2_10_garch))
+
+scalar p_val_P2_1_garch = 1 - cdf(c, 1, LR_P2_1_garch)
+scalar p_val_P2_5_garch = 1 - cdf(c, 1, LR_P2_5_garch)
+scalar p_val_P2_10_garch = 1 - cdf(c, 1, LR_P2_10_garch)
+
+# === Affichage des tableaux de résultats ===
+
+matrix Tab_P1_garch = { 1, nb_hits_P1_1_garch, p_hat_P1_1_garch, p_val_P1_1_garch ;
+                        5, nb_hits_P1_5_garch, p_hat_P1_5_garch, p_val_P1_5_garch ;
+                       10, nb_hits_P1_10_garch, p_hat_P1_10_garch, p_val_P1_10_garch }
+
+matrix Tab_P2_garch = { 1, nb_hits_P2_1_garch, p_hat_P2_1_garch, p_val_P2_1_garch ;
+                        5, nb_hits_P2_5_garch, p_hat_P2_5_garch, p_val_P2_5_garch ;
+                       10, nb_hits_P2_10_garch, p_hat_P2_10_garch, p_val_P2_10_garch }
+
+# Mise en page
+rownames(Tab_P1_garch, "GARCH_1% GARCH_5% GARCH_10%")
+colnames(Tab_P1_garch, "Alpha #hits Taux_hits p-value")
+rownames(Tab_P2_garch, "GARCH_1% GARCH_5% GARCH_10%")
+colnames(Tab_P2_garch, "Alpha #hits Taux_hits p-value")
+
+print "--- ROBUSTESSE GARCH(1,1) : Période 1 (Jours 501 à 625) ---"
+print Tab_P1_garch
+
+print "--- ROBUSTESSE GARCH(1,1) : Période 2 (Jours 626 à 750) ---"
+print Tab_P2_garch
+
+smpl full
+
+# ============================================================
+# Comparaison AIC
+# ============================================================
+
+#Creation plusieurs modeles
+smpl 1 500
+
+garch 1 1 ; Return 
+garch 1 1 ; Return --t-dist
+
+garch 0 2 ; Return --quiet
+scalar Arch2_aic = $aic
+scalar Arch2_bic = $bic
+
+garch 1 1 ; Return --quiet
+scalar Garch11_aic = $aic
+scalar Garch11_bic = $bic
+
+garch 2 2 ; Return --quiet
+scalar Garch22_aic = $aic
+scalar Garch22_bic = $bic
+
+
+#Creation tableau de resultat
+matrix Tab_Criteres = {Arch2_aic, Arch2_bic ; 
+                       Garch11_aic, Garch11_bic ; 
+                       Garch22_aic, Garch22_bic}
+                       
+rownames(Tab_Criteres, "ARCH(2) GARCH(1,1) GARCH(2,2)")
+colnames(Tab_Criteres, "AIC BIC")
+print Tab_Criteres
+
+# ============================================================
+# Modeles supplementaires
+# ============================================================
+
+#==== GARCH STUDENT =====
+smpl 1 500
+bundle GARCH_student = gig_setup(Return, 1, const)
+gig_set_dist(&GARCH_student, 1) 
+gig_estimate(&GARCH_student)
+
+smpl full
+#Recuperation coefficients estimes
+scalar mu = GARCH_student.coeff[1]
+scalar omega = GARCH_student.coeff[2]
+scalar alpha = GARCH_student.coeff[3]
+scalar beta = GARCH_student.coeff[5] #Coeff 4 est alloue a une autre variable
+scalar nu = GARCH_student.coeff[7] #Coeff pour degres de liberte
+
+series var_cond_garch_st = GARCH_student.h #Recuperation var cond du GARCH
+series ets_garch_st = Return - mu #Calcul des residus
+
+#Prediction de la variance conditionnelle hors sample
+loop i = 501..750 --quiet
+   var_cond_garch_st[i] = omega + alpha * ets_garch_st[i-1]^2 + beta * var_cond_garch_st[i-1]
+endloop  
+
+#Calcul des VAR
+smpl 501 750 --quiet
+
+series sigma_garch_st = sqrt(var_cond_garch_st)
+
+#Recuperation des quantiles
+scalar z_1  = invcdf(t, nu, 0.99)
+scalar z_5  = invcdf(t, nu, 0.95)
+scalar z_10 = invcdf(t, nu, 0.90)
+
+series VaR_garch_st_1pct  = -mu + z_1 * sigma_garch_st
+series VaR_garch_st_5pct  = -mu + z_5 * sigma_garch_st
+series VaR_garch_st_10pct = -mu + z_10 * sigma_garch_st
+
+#Calcul prediction ES
+series ES_garch_st_1pct = NA #Intialisation des series a vide
+series ES_garch_st_5pct = NA
+series ES_garch_st_10pct = NA
+
+smpl full 
+
+loop i = 501..750
+    #Estimation ES sur base fenetre de 250j
+    smpl (i-250) (i-1) --quiet
+    series pertes_queue_1 = (Loss > VaR_garch_st_1pct[i]) ? Loss : NA #On garde les pertes plus hautes que le seuil
+    ES_garch_st_1pct[i] = mean(pertes_queue_1)
+    
+    series pertes_queue_5 = (Loss > VaR_garch_st_5pct[i]) ? Loss : NA
+    ES_garch_st_5pct[i] = mean(pertes_queue_5)
+    
+    series pertes_queue_10 = (Loss > VaR_garch_st_10pct[i]) ? Loss : NA
+    ES_garch_st_10pct[i] = mean(pertes_queue_10)
+    
+endloop
+
+#BackTesting GARCH
+smpl 501 750 --quiet
+
+# Definition variable binaire si hit (hit = 1 sinon 0)
+series Hit_1_garch_st = (Loss > VaR_garch_st_1pct)
+series Hit_5_garch_st = (Loss > VaR_garch_st_5pct)
+series Hit_10_garch_st = (Loss > VaR_garch_st_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_1_garch_st = sum(Hit_1_garch_st)
+scalar nb_hits_5_garch_st = sum(Hit_5_garch_st)
+scalar nb_hits_10_garch_st = sum(Hit_10_garch_st)
+
+# Parametres
+scalar N = $nobs # nombre obs hors echantillon (250)
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+# Calcul du taux empirique (nbr de hit sur nbr obs)
+scalar p_hat_1_garch_st = nb_hits_1_garch_st / N
+scalar p_hat_5_garch_st = nb_hits_5_garch_st / N
+scalar p_hat_10_garch_st = nb_hits_10_garch_st / N
+
+# Calcul de la statistique LR
+scalar LR_uc_1_garch_st = -2 * ln(((1-p_1)^(N-nb_hits_1_garch_st) * p_1^nb_hits_1_garch_st) / ((1-p_hat_1_garch_st)^(N-nb_hits_1_garch_st) * p_hat_1_garch_st^nb_hits_1_garch_st))
+scalar LR_uc_5_garch_st = -2 * ln(((1-p_5)^(N-nb_hits_5_garch_st) * p_5^nb_hits_5_garch_st) / ((1-p_hat_5_garch_st)^(N-nb_hits_5_garch_st) * p_hat_5_garch_st^nb_hits_5_garch_st))
+scalar LR_uc_10_garch_st = -2 * ln(((1-p_10)^(N-nb_hits_10_garch_st) * p_10^nb_hits_10_garch_st) / ((1-p_hat_10_garch_st)^(N-nb_hits_10_garch_st) * p_hat_10_garch_st^nb_hits_10_garch_st))
+
+# Calcul de la p-value du test de Kupiec
+scalar p_value_kupiec_1_garch_st = 1 - cdf(c, 1, LR_uc_1_garch_st)
+scalar p_value_kupiec_5_garch_st = 1 - cdf(c, 1, LR_uc_5_garch_st)
+scalar p_value_kupiec_10_garch_st = 1 - cdf(c, 1, LR_uc_10_garch_st)
+
+# Creation tableau de resultat
+matrix Tab_Backtest_GARCH_st = { 1, nb_hits_1_garch_st, p_hat_1_garch_st, p_value_kupiec_1_garch_st ; 
+                           5, nb_hits_5_garch_st, p_hat_5_garch_st, p_value_kupiec_5_garch_st ; 
+                           10, nb_hits_10_garch_st, p_hat_10_garch_st, p_value_kupiec_10_garch_st }
+
+# Modification noms colonnes / lignes
+rownames(Tab_Backtest_GARCH_st, "GARCH_ST_1% GARCH_ST_5% GARCH_ST_10%")
+colnames(Tab_Backtest_GARCH_st, "Alpha #hits Taux_hits p-value")
+print "--- Résultats backtesting (GARCH(1,1)) ---"
+print Tab_Backtest_GARCH_st
+
+#Calcul de l'ES effectif
+smpl 501 750 --quiet
+#ES observe moyen
+scalar ES_obs_1_garch_st = mean((Loss > VaR_garch_st_1pct) ? Loss : NA)
+scalar ES_obs_5_garch_st = mean((Loss > VaR_garch_st_5pct) ? Loss : NA)
+scalar ES_obs_10_garch_st = mean((Loss > VaR_garch_st_10pct) ? Loss : NA)
+
+# ES predit moyen
+scalar ES_pred_1_garch_st = mean(ES_garch_st_1pct)
+scalar ES_pred_5_garch_st = mean(ES_garch_st_5pct)
+scalar ES_pred_10_garch_st = mean(ES_garch_st_10pct)
+
+matrix Tab_ES_GARCH_st = { 1, ES_obs_1_garch_st, ES_pred_1_garch_st ;
+                     5, ES_obs_5_garch_st, ES_pred_5_garch_st ;
+                     10, ES_obs_10_garch_st, ES_pred_10_garch_st }
+
+rownames(Tab_ES_GARCH_st, "GARCH_ST_1% GARCH_ST_5% GARCH_ST_10%")
+colnames(Tab_ES_GARCH_st, "Alpha ES_observe ES_predit")
+print "--- Diagnostic ES : Pertes observees en queue vs ES predites ---"
+print Tab_ES_GARCH_st
+                       
+smpl full 
+
+# === Robustesse GARCH STUDENT ===
+scalar N_sub = 125
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+# === Sous-periode 1 (501 - 625) ===
+smpl 501 625 --quiet
+
+# Variable binaire si hit
+series Hit_P1_1_garch_st = (Loss > VaR_garch_st_1pct)
+series Hit_P1_5_garch_st = (Loss > VaR_garch_st_5pct)
+series Hit_P1_10_garch_st = (Loss > VaR_garch_st_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P1_1_garch_st = sum(Hit_P1_1_garch_st)
+scalar nb_hits_P1_5_garch_st = sum(Hit_P1_5_garch_st)
+scalar nb_hits_P1_10_garch_st = sum(Hit_P1_10_garch_st)
+
+# Taux empirique
+scalar p_hat_P1_1_garch_st = nb_hits_P1_1_garch_st / N_sub
+scalar p_hat_P1_5_garch_st = nb_hits_P1_5_garch_st / N_sub
+scalar p_hat_P1_10_garch_st = nb_hits_P1_10_garch_st / N_sub
+
+# Calcul LR et p-value pour P1
+scalar LR_P1_1_garch_st = -2 * ln(((1-p_1)^(N_sub-nb_hits_P1_1_garch_st) * p_1^nb_hits_P1_1_garch_st) / ((1-p_hat_P1_1_garch_st)^(N_sub-nb_hits_P1_1_garch_st) * p_hat_P1_1_garch_st^nb_hits_P1_1_garch_st))
+scalar LR_P1_5_garch_st = -2 * ln(((1-p_5)^(N_sub-nb_hits_P1_5_garch_st) * p_5^nb_hits_P1_5_garch_st) / ((1-p_hat_P1_5_garch_st)^(N_sub-nb_hits_P1_5_garch_st) * p_hat_P1_5_garch_st^nb_hits_P1_5_garch_st))
+scalar LR_P1_10_garch_st = -2 * ln(((1-p_10)^(N_sub-nb_hits_P1_10_garch_st) * p_10^nb_hits_P1_10_garch_st) / ((1-p_hat_P1_10_garch_st)^(N_sub-nb_hits_P1_10_garch_st) * p_hat_P1_10_garch_st^nb_hits_P1_10_garch_st))
+
+scalar p_val_P1_1_garch_st = 1 - cdf(c, 1, LR_P1_1_garch_st)
+scalar p_val_P1_5_garch_st = 1 - cdf(c, 1, LR_P1_5_garch_st)
+scalar p_val_P1_10_garch_st = 1 - cdf(c, 1, LR_P1_10_garch_st)
+
+# === Sous-periode 2 (626 - 750) ===
+
+smpl 626 750 --quiet
+
+# Variable binaire si hit
+series Hit_P2_1_garch_st = (Loss > VaR_garch_st_1pct)
+series Hit_P2_5_garch_st = (Loss > VaR_garch_st_5pct)
+series Hit_P2_10_garch_st = (Loss > VaR_garch_st_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P2_1_garch_st = sum(Hit_P2_1_garch_st)
+scalar nb_hits_P2_5_garch_st = sum(Hit_P2_5_garch_st)
+scalar nb_hits_P2_10_garch_st = sum(Hit_P2_10_garch_st)
+
+# Taux empirique
+scalar p_hat_P2_1_garch_st = nb_hits_P2_1_garch_st / N_sub
+scalar p_hat_P2_5_garch_st = nb_hits_P2_5_garch_st / N_sub
+scalar p_hat_P2_10_garch_st = nb_hits_P2_10_garch_st / N_sub
+
+# Calcul LR et p-value pour P2
+scalar LR_P2_1_garch_st = -2 * ln(((1-p_1)^(N_sub-nb_hits_P2_1_garch_st) * p_1^nb_hits_P2_1_garch_st) / ((1-p_hat_P2_1_garch_st)^(N_sub-nb_hits_P2_1_garch_st) * p_hat_P2_1_garch_st^nb_hits_P2_1_garch_st))
+scalar LR_P2_5_garch_st = -2 * ln(((1-p_5)^(N_sub-nb_hits_P2_5_garch_st) * p_5^nb_hits_P2_5_garch_st) / ((1-p_hat_P2_5_garch_st)^(N_sub-nb_hits_P2_5_garch_st) * p_hat_P2_5_garch_st^nb_hits_P2_5_garch_st))
+scalar LR_P2_10_garch_st = -2 * ln(((1-p_10)^(N_sub-nb_hits_P2_10_garch_st) * p_10^nb_hits_P2_10_garch_st) / ((1-p_hat_P2_10_garch_st)^(N_sub-nb_hits_P2_10_garch_st) * p_hat_P2_10_garch_st^nb_hits_P2_10_garch_st))
+
+scalar p_val_P2_1_garch_st = 1 - cdf(c, 1, LR_P2_1_garch_st)
+scalar p_val_P2_5_garch_st = 1 - cdf(c, 1, LR_P2_5_garch_st)
+scalar p_val_P2_10_garch_st = 1 - cdf(c, 1, LR_P2_10_garch_st)
+
+# === Affichage des tableaux de résultats ===
+
+matrix Tab_P1_garch_st = { 1, nb_hits_P1_1_garch_st, p_hat_P1_1_garch_st, p_val_P1_1_garch_st ;
+                           5, nb_hits_P1_5_garch_st, p_hat_P1_5_garch_st, p_val_P1_5_garch_st ;
+                          10, nb_hits_P1_10_garch_st, p_hat_P1_10_garch_st, p_val_P1_10_garch_st }
+
+matrix Tab_P2_garch_st = { 1, nb_hits_P2_1_garch_st, p_hat_P2_1_garch_st, p_val_P2_1_garch_st ;
+                           5, nb_hits_P2_5_garch_st, p_hat_P2_5_garch_st, p_val_P2_5_garch_st ;
+                          10, nb_hits_P2_10_garch_st, p_hat_P2_10_garch_st, p_val_P2_10_garch_st }
+
+# Mise en page
+rownames(Tab_P1_garch_st, "GARCH_ST_1% GARCH_ST_5% GARCH_ST_10%")
+colnames(Tab_P1_garch_st, "Alpha #hits Taux_hits p-value")
+rownames(Tab_P2_garch_st, "GARCH_ST_1% GARCH_ST_5% GARCH_ST_10%")
+colnames(Tab_P2_garch_st, "Alpha #hits Taux_hits p-value")
+
+print "--- ROBUSTESSE GARCH STUDENT : Période 1 (Jours 501 à 625) ---"
+print Tab_P1_garch_st
+
+print "--- ROBUSTESSE GARCH STUDENT : Période 2 (Jours 626 à 750) ---"
+print Tab_P2_garch_st
+
+smpl full
+
+
+#==== GJR GARCH - Normal =====
+smpl 1 500
+bundle GJR_GARCH = gig_setup(Return, 3, const)
+gig_estimate(&GJR_GARCH)
+
+smpl full
+#Recuperation coefficients estimes
+scalar mu = GJR_GARCH.coeff[1]
+scalar omega = GJR_GARCH.coeff[2]
+scalar alpha = GJR_GARCH.coeff[3]
+scalar gamma = GJR_GARCH.coeff[4]
+scalar beta = GJR_GARCH.coeff[5]
+
+series var_cond_gjr = GJR_GARCH.h #Recuperation var cond du GARCH
+series ets_gjr = Return - mu #Calcul des residus
+
+#Prediction de la variance conditionnelle hors sample
+loop i = 501..750 --quiet
+   scalar I_neg = (ets_gjr[i-1] < 0) ? 1 : 0 #Si residu precedent negatif = mauvaise nouvelle = 1 si pas 0
+   var_cond_gjr[i] = omega + alpha * ets_gjr[i-1]^2 + gamma * (ets_gjr[i-1]^2 * I_neg) + beta * var_cond_gjr[i-1]
+endloop  
+
+#Calcul des VAR
+smpl 501 750 --quiet
+
+series sigma_gjr = sqrt(var_cond_gjr)
+
+#Recuperation des quantiles
+scalar z_1 = invcdf(z, 0.99)   
+scalar z_5 = invcdf(z, 0.95)   
+scalar z_10 = invcdf(z, 0.90) 
+
+series VaR_gjr_1pct  = -mu + z_1 * sigma_gjr
+series VaR_gjr_5pct  = -mu + z_5 * sigma_gjr
+series VaR_gjr_10pct = -mu + z_10 * sigma_gjr
+
+#Calcul prediction ES
+series ES_gjr_1pct = NA #Intialisation des series a vide
+series ES_gjr_5pct = NA
+series ES_gjr_10pct = NA
+
+smpl full 
+
+loop i = 501..750
+    #Estimation ES sur base fenetre de 250j
+    smpl (i-250) (i-1) --quiet
+    series pertes_queue_1 = (Loss > VaR_gjr_1pct[i]) ? Loss : NA #On garde les pertes plus hautes que le seuil
+    ES_gjr_1pct[i] = mean(pertes_queue_1)
+    
+    series pertes_queue_5 = (Loss > VaR_gjr_5pct[i]) ? Loss : NA
+    ES_gjr_5pct[i] = mean(pertes_queue_5)
+    
+    series pertes_queue_10 = (Loss > VaR_gjr_10pct[i]) ? Loss : NA
+    ES_gjr_10pct[i] = mean(pertes_queue_10)
+    
+endloop
+
+#BackTesting GARCH
+smpl 501 750 --quiet
+
+# Definition variable binaire si hit (hit = 1 sinon 0)
+series Hit_1_gjr = (Loss > VaR_gjr_1pct)
+series Hit_5_gjr = (Loss > VaR_gjr_5pct)
+series Hit_10_gjr = (Loss > VaR_gjr_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_1_gjr = sum(Hit_1_gjr)
+scalar nb_hits_5_gjr = sum(Hit_5_gjr)
+scalar nb_hits_10_gjr = sum(Hit_10_gjr)
+
+# Parametres
+scalar N = $nobs # nombre obs hors echantillon (250)
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+# Calcul du taux empirique (nbr de hit sur nbr obs)
+scalar p_hat_1_gjr = nb_hits_1_gjr / N
+scalar p_hat_5_gjr = nb_hits_5_gjr / N
+scalar p_hat_10_gjr = nb_hits_10_gjr / N
+
+# Calcul de la statistique LR
+scalar LR_uc_1_gjr = -2 * ln(((1-p_1)^(N-nb_hits_1_gjr) * p_1^nb_hits_1_gjr) / ((1-p_hat_1_gjr)^(N-nb_hits_1_gjr) * p_hat_1_gjr^nb_hits_1_gjr))
+scalar LR_uc_5_gjr = -2 * ln(((1-p_5)^(N-nb_hits_5_gjr) * p_5^nb_hits_5_gjr) / ((1-p_hat_5_gjr)^(N-nb_hits_5_gjr) * p_hat_5_gjr^nb_hits_5_gjr))
+scalar LR_uc_10_gjr = -2 * ln(((1-p_10)^(N-nb_hits_10_gjr) * p_10^nb_hits_10_gjr) / ((1-p_hat_10_gjr)^(N-nb_hits_10_gjr) * p_hat_10_gjr^nb_hits_10_gjr))
+
+# Calcul de la p-value du test de Kupiec
+scalar p_value_kupiec_1_gjr = 1 - cdf(c, 1, LR_uc_1_gjr)
+scalar p_value_kupiec_5_gjr = 1 - cdf(c, 1, LR_uc_5_gjr)
+scalar p_value_kupiec_10_gjr = 1 - cdf(c, 1, LR_uc_10_gjr)
+
+# Creation tableau de resultat
+matrix Tab_Backtest_GJR = { 1, nb_hits_1_gjr, p_hat_1_gjr, p_value_kupiec_1_gjr ; 
+                           5, nb_hits_5_gjr, p_hat_5_gjr, p_value_kupiec_5_gjr ; 
+                           10, nb_hits_10_gjr, p_hat_10_gjr, p_value_kupiec_10_gjr }
+
+# Modification noms colonnes / lignes
+rownames(Tab_Backtest_GJR, "GJR_1% GJR_5% GJR_10%")
+colnames(Tab_Backtest_GJR, "Alpha #hits Taux_hits p-value")
+print "--- Résultats backtesting (GJR-GARCH(1,1)) ---"
+print Tab_Backtest_GJR
+
+#Calcul de l'ES effectif
+smpl 501 750 --quiet
+#ES observe moyen
+scalar ES_obs_1_gjr = mean((Loss > VaR_gjr_1pct) ? Loss : NA)
+scalar ES_obs_5_gjr = mean((Loss > VaR_gjr_5pct) ? Loss : NA)
+scalar ES_obs_10_gjr = mean((Loss > VaR_gjr_10pct) ? Loss : NA)
+
+# ES predit moyen
+scalar ES_pred_1_gjr = mean(ES_gjr_1pct)
+scalar ES_pred_5_gjr = mean(ES_gjr_5pct)
+scalar ES_pred_10_gjr = mean(ES_gjr_10pct)
+
+matrix Tab_ES_gjr = { 1, ES_obs_1_gjr, ES_pred_1_gjr ;
+                     5, ES_obs_5_gjr, ES_pred_5_gjr ;
+                     10, ES_obs_10_gjr, ES_pred_10_gjr }
+
+rownames(Tab_ES_gjr, "GJR_1% GJR_5% GJR_10%")
+colnames(Tab_ES_gjr, "Alpha ES_observe ES_predit")
+print "--- Diagnostic ES : Pertes observees en queue vs ES predites ---"
+print Tab_ES_gjr
+                       
+smpl full 
+
+# === Robustesse GJR-GARCH Normal (3 seuils, 2 sous-périodes) ===
+
+scalar N_sub = 125
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+# === Sous-periode 1 (501 - 625) ===
+
+smpl 501 625 --quiet
+
+# Variable binaire si hit
+series Hit_P1_1_gjr = (Loss > VaR_gjr_1pct)
+series Hit_P1_5_gjr = (Loss > VaR_gjr_5pct)
+series Hit_P1_10_gjr = (Loss > VaR_gjr_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P1_1_gjr = sum(Hit_P1_1_gjr)
+scalar nb_hits_P1_5_gjr = sum(Hit_P1_5_gjr)
+scalar nb_hits_P1_10_gjr = sum(Hit_P1_10_gjr)
+
+# Taux empirique
+scalar p_hat_P1_1_gjr = nb_hits_P1_1_gjr / N_sub
+scalar p_hat_P1_5_gjr = nb_hits_P1_5_gjr / N_sub
+scalar p_hat_P1_10_gjr = nb_hits_P1_10_gjr / N_sub
+
+# Calcul LR et p-value pour P1
+scalar LR_P1_1_gjr = -2 * ln(((1-p_1)^(N_sub-nb_hits_P1_1_gjr) * p_1^nb_hits_P1_1_gjr) / ((1-p_hat_P1_1_gjr)^(N_sub-nb_hits_P1_1_gjr) * p_hat_P1_1_gjr^nb_hits_P1_1_gjr))
+scalar LR_P1_5_gjr = -2 * ln(((1-p_5)^(N_sub-nb_hits_P1_5_gjr) * p_5^nb_hits_P1_5_gjr) / ((1-p_hat_P1_5_gjr)^(N_sub-nb_hits_P1_5_gjr) * p_hat_P1_5_gjr^nb_hits_P1_5_gjr))
+scalar LR_P1_10_gjr = -2 * ln(((1-p_10)^(N_sub-nb_hits_P1_10_gjr) * p_10^nb_hits_P1_10_gjr) / ((1-p_hat_P1_10_gjr)^(N_sub-nb_hits_P1_10_gjr) * p_hat_P1_10_gjr^nb_hits_P1_10_gjr))
+
+scalar p_val_P1_1_gjr = 1 - cdf(c, 1, LR_P1_1_gjr)
+scalar p_val_P1_5_gjr = 1 - cdf(c, 1, LR_P1_5_gjr)
+scalar p_val_P1_10_gjr = 1 - cdf(c, 1, LR_P1_10_gjr)
+
+# === Sous-periode 2 (626 - 750) ===
+
+smpl 626 750 --quiet
+
+# Variable binaire si hit
+series Hit_P2_1_gjr = (Loss > VaR_gjr_1pct)
+series Hit_P2_5_gjr = (Loss > VaR_gjr_5pct)
+series Hit_P2_10_gjr = (Loss > VaR_gjr_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P2_1_gjr = sum(Hit_P2_1_gjr)
+scalar nb_hits_P2_5_gjr = sum(Hit_P2_5_gjr)
+scalar nb_hits_P2_10_gjr = sum(Hit_P2_10_gjr)
+
+# Taux empirique
+scalar p_hat_P2_1_gjr = nb_hits_P2_1_gjr / N_sub
+scalar p_hat_P2_5_gjr = nb_hits_P2_5_gjr / N_sub
+scalar p_hat_P2_10_gjr = nb_hits_P2_10_gjr / N_sub
+
+# Calcul LR et p-value pour P2
+scalar LR_P2_1_gjr = -2 * ln(((1-p_1)^(N_sub-nb_hits_P2_1_gjr) * p_1^nb_hits_P2_1_gjr) / ((1-p_hat_P2_1_gjr)^(N_sub-nb_hits_P2_1_gjr) * p_hat_P2_1_gjr^nb_hits_P2_1_gjr))
+scalar LR_P2_5_gjr = -2 * ln(((1-p_5)^(N_sub-nb_hits_P2_5_gjr) * p_5^nb_hits_P2_5_gjr) / ((1-p_hat_P2_5_gjr)^(N_sub-nb_hits_P2_5_gjr) * p_hat_P2_5_gjr^nb_hits_P2_5_gjr))
+scalar LR_P2_10_gjr = -2 * ln(((1-p_10)^(N_sub-nb_hits_P2_10_gjr) * p_10^nb_hits_P2_10_gjr) / ((1-p_hat_P2_10_gjr)^(N_sub-nb_hits_P2_10_gjr) * p_hat_P2_10_gjr^nb_hits_P2_10_gjr))
+
+scalar p_val_P2_1_gjr = 1 - cdf(c, 1, LR_P2_1_gjr)
+scalar p_val_P2_5_gjr = 1 - cdf(c, 1, LR_P2_5_gjr)
+scalar p_val_P2_10_gjr = 1 - cdf(c, 1, LR_P2_10_gjr)
+
+# === Affichage des tableaux de résultats ===
+
+matrix Tab_P1_gjr = { 1, nb_hits_P1_1_gjr, p_hat_P1_1_gjr, p_val_P1_1_gjr ;
+                      5, nb_hits_P1_5_gjr, p_hat_P1_5_gjr, p_val_P1_5_gjr ;
+                     10, nb_hits_P1_10_gjr, p_hat_P1_10_gjr, p_val_P1_10_gjr }
+
+matrix Tab_P2_gjr = { 1, nb_hits_P2_1_gjr, p_hat_P2_1_gjr, p_val_P2_1_gjr ;
+                      5, nb_hits_P2_5_gjr, p_hat_P2_5_gjr, p_val_P2_5_gjr ;
+                     10, nb_hits_P2_10_gjr, p_hat_P2_10_gjr, p_val_P2_10_gjr }
+
+# Mise en page
+rownames(Tab_P1_gjr, "GJR_1% GJR_5% GJR_10%")
+colnames(Tab_P1_gjr, "Alpha #hits Taux_hits p-value")
+rownames(Tab_P2_gjr, "GJR_1% GJR_5% GJR_10%")
+colnames(Tab_P2_gjr, "Alpha #hits Taux_hits p-value")
+
+print "--- ROBUSTESSE GJR-GARCH NORMAL : Période 1 (Jours 501 à 625) ---"
+print Tab_P1_gjr
+
+print "--- ROBUSTESSE GJR-GARCH NORMAL : Période 2 (Jours 626 à 750) ---"
+print Tab_P2_gjr
+
+smpl full
+
+#==== GJR GARCH - Student =====
+smpl 1 500
+bundle GJR_GARCH_st = gig_setup(Return, 3, const)
+gig_set_dist(&GJR_GARCH_st, 1) 
+gig_estimate(&GJR_GARCH_st)
+
+smpl full
+#Recuperation coefficients estimes
+scalar mu = GJR_GARCH_st.coeff[1]
+scalar omega = GJR_GARCH_st.coeff[2]
+scalar alpha = GJR_GARCH_st.coeff[3]
+scalar gamma = GJR_GARCH_st.coeff[4]
+scalar beta = GJR_GARCH_st.coeff[5]
+scalar nu =  GJR_GARCH_st.coeff[7]
+
+series var_cond_gjr_st = GJR_GARCH_st.h #Recuperation var cond du GARCH
+series ets_gjr_st = Return - mu #Calcul des residus
+
+#Prediction de la variance conditionnelle hors sample
+loop i = 501..750 --quiet
+   scalar I_neg = (ets_gjr_st[i-1] < 0) ? 1 : 0 #Si residu precedent negatif = mauvaise nouvelle = 1 si pas 0
+   var_cond_gjr_st[i] = omega + alpha * ets_gjr_st[i-1]^2 + gamma * (ets_gjr_st[i-1]^2 * I_neg) + beta * var_cond_gjr_st[i-1]
+endloop  
+
+#Calcul des VAR
+smpl 501 750 --quiet
+
+series sigma_gjr_st = sqrt(var_cond_gjr_st)
+
+#Recuperation des quantiles
+scalar z_1  = invcdf(t, nu, 0.99)
+scalar z_5  = invcdf(t, nu, 0.95)
+scalar z_10 = invcdf(t, nu, 0.90)
+
+series VaR_gjr_st_1pct  = -mu + z_1 * sigma_gjr_st
+series VaR_gjr_st_5pct  = -mu + z_5 * sigma_gjr_st
+series VaR_gjr_st_10pct = -mu + z_10 * sigma_gjr_st
+
+#Calcul prediction ES
+series ES_gjr_st_1pct = NA #Intialisation des series a vide
+series ES_gjr_st_5pct = NA
+series ES_gjr_st_10pct = NA
+
+smpl full 
+
+loop i = 501..750
+    #Estimation ES sur base fenetre de 250j
+    smpl (i-250) (i-1) --quiet
+    series pertes_queue_1 = (Loss > VaR_gjr_st_1pct[i]) ? Loss : NA #On garde les pertes plus hautes que le seuil
+    ES_gjr_st_1pct[i] = mean(pertes_queue_1)
+    
+    series pertes_queue_5 = (Loss > VaR_gjr_st_5pct[i]) ? Loss : NA
+    ES_gjr_st_5pct[i] = mean(pertes_queue_5)
+    
+    series pertes_queue_10 = (Loss > VaR_gjr_st_10pct[i]) ? Loss : NA
+    ES_gjr_st_10pct[i] = mean(pertes_queue_10)
+    
+endloop
+
+#BackTesting GARCH
+smpl 501 750 --quiet
+
+# Definition variable binaire si hit (hit = 1 sinon 0)
+series Hit_1_gjr_st = (Loss > VaR_gjr_st_1pct)
+series Hit_5_gjr_st = (Loss > VaR_gjr_st_5pct)
+series Hit_10_gjr_st = (Loss > VaR_gjr_st_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_1_gjr_st = sum(Hit_1_gjr_st)
+scalar nb_hits_5_gjr_st = sum(Hit_5_gjr_st)
+scalar nb_hits_10_gjr_st = sum(Hit_10_gjr_st)
+
+# Parametres
+scalar N = $nobs # nombre obs hors echantillon (250)
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+# Calcul du taux empirique (nbr de hit sur nbr obs)
+scalar p_hat_1_gjr_st = nb_hits_1_gjr_st / N
+scalar p_hat_5_gjr_st = nb_hits_5_gjr_st / N
+scalar p_hat_10_gjr_st = nb_hits_10_gjr_st / N
+
+# Calcul de la statistique LR
+scalar LR_uc_1_gjr_st = -2 * ln(((1-p_1)^(N-nb_hits_1_gjr_st) * p_1^nb_hits_1_gjr_st) / ((1-p_hat_1_gjr_st)^(N-nb_hits_1_gjr_st) * p_hat_1_gjr_st^nb_hits_1_gjr_st))
+scalar LR_uc_5_gjr_st = -2 * ln(((1-p_5)^(N-nb_hits_5_gjr_st) * p_5^nb_hits_5_gjr_st) / ((1-p_hat_5_gjr_st)^(N-nb_hits_5_gjr_st) * p_hat_5_gjr_st^nb_hits_5_gjr_st))
+scalar LR_uc_10_gjr_st = -2 * ln(((1-p_10)^(N-nb_hits_10_gjr_st) * p_10^nb_hits_10_gjr_st) / ((1-p_hat_10_gjr_st)^(N-nb_hits_10_gjr_st) * p_hat_10_gjr_st^nb_hits_10_gjr_st))
+
+# Calcul de la p-value du test de Kupiec
+scalar p_value_kupiec_1_gjr_st = 1 - cdf(c, 1, LR_uc_1_gjr_st)
+scalar p_value_kupiec_5_gjr_st = 1 - cdf(c, 1, LR_uc_5_gjr_st)
+scalar p_value_kupiec_10_gjr_st = 1 - cdf(c, 1, LR_uc_10_gjr_st)
+
+# Creation tableau de resultat
+matrix Tab_Backtest_GJR_st = { 1, nb_hits_1_gjr_st, p_hat_1_gjr_st, p_value_kupiec_1_gjr_st ; 
+                           5, nb_hits_5_gjr_st, p_hat_5_gjr_st, p_value_kupiec_5_gjr_st ; 
+                           10, nb_hits_10_gjr_st, p_hat_10_gjr_st, p_value_kupiec_10_gjr_st }
+
+# Modification noms colonnes / lignes
+rownames(Tab_Backtest_GJR_st, "GJR_ST_1% GJR_ST_5% GJR_ST_10%")
+colnames(Tab_Backtest_GJR_st, "Alpha #hits Taux_hits p-value")
+print "--- Résultats backtesting (GJR-GARCH(1,1) - Student) ---"
+print Tab_Backtest_GJR_st
+
+#Calcul de l'ES effectif
+smpl 501 750 --quiet
+#ES observe moyen
+scalar ES_obs_1_gjr_st = mean((Loss > VaR_gjr_st_1pct) ? Loss : NA)
+scalar ES_obs_5_gjr_st = mean((Loss > VaR_gjr_st_5pct) ? Loss : NA)
+scalar ES_obs_10_gjr_st = mean((Loss > VaR_gjr_st_10pct) ? Loss : NA)
+
+# ES predit moyen
+scalar ES_pred_1_gjr_st = mean(ES_gjr_st_1pct)
+scalar ES_pred_5_gjr_st = mean(ES_gjr_st_5pct)
+scalar ES_pred_10_gjr_st = mean(ES_gjr_st_10pct)
+
+matrix Tab_ES_gjr_st = { 1, ES_obs_1_gjr_st, ES_pred_1_gjr_st ;
+                     5, ES_obs_5_gjr_st, ES_pred_5_gjr_st ;
+                     10, ES_obs_10_gjr_st, ES_pred_10_gjr_st }
+
+rownames(Tab_ES_gjr_st, "GJR_ST_1% GJR_ST_5% GJR_ST_10%")
+colnames(Tab_ES_gjr_st, "Alpha ES_observe ES_predit")
+print "--- Diagnostic ES : Pertes observees en queue vs ES predites ---"
+print Tab_ES_gjr_st
+                       
+smpl full 
+
+# === Robustesse GJR-GARCH STUDENT ===
+
+scalar N_sub = 125
+scalar p_1 = 0.01
+scalar p_5 = 0.05
+scalar p_10 = 0.10
+
+# === Sous-periode 1 (501 - 625) ===
+
+smpl 501 625 --quiet
+
+# Variable binaire si hit
+series Hit_P1_1_gjr_st = (Loss > VaR_gjr_st_1pct)
+series Hit_P1_5_gjr_st = (Loss > VaR_gjr_st_5pct)
+series Hit_P1_10_gjr_st = (Loss > VaR_gjr_st_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P1_1_gjr_st = sum(Hit_P1_1_gjr_st)
+scalar nb_hits_P1_5_gjr_st = sum(Hit_P1_5_gjr_st)
+scalar nb_hits_P1_10_gjr_st = sum(Hit_P1_10_gjr_st)
+
+# Taux empirique
+scalar p_hat_P1_1_gjr_st = nb_hits_P1_1_gjr_st / N_sub
+scalar p_hat_P1_5_gjr_st = nb_hits_P1_5_gjr_st / N_sub
+scalar p_hat_P1_10_gjr_st = nb_hits_P1_10_gjr_st / N_sub
+
+# Calcul LR et p-value pour P1
+scalar LR_P1_1_gjr_st = -2 * ln(((1-p_1)^(N_sub-nb_hits_P1_1_gjr_st) * p_1^nb_hits_P1_1_gjr_st) / ((1-p_hat_P1_1_gjr_st)^(N_sub-nb_hits_P1_1_gjr_st) * p_hat_P1_1_gjr_st^nb_hits_P1_1_gjr_st))
+scalar LR_P1_5_gjr_st = -2 * ln(((1-p_5)^(N_sub-nb_hits_P1_5_gjr_st) * p_5^nb_hits_P1_5_gjr_st) / ((1-p_hat_P1_5_gjr_st)^(N_sub-nb_hits_P1_5_gjr_st) * p_hat_P1_5_gjr_st^nb_hits_P1_5_gjr_st))
+scalar LR_P1_10_gjr_st = -2 * ln(((1-p_10)^(N_sub-nb_hits_P1_10_gjr_st) * p_10^nb_hits_P1_10_gjr_st) / ((1-p_hat_P1_10_gjr_st)^(N_sub-nb_hits_P1_10_gjr_st) * p_hat_P1_10_gjr_st^nb_hits_P1_10_gjr_st))
+
+scalar p_val_P1_1_gjr_st = 1 - cdf(c, 1, LR_P1_1_gjr_st)
+scalar p_val_P1_5_gjr_st = 1 - cdf(c, 1, LR_P1_5_gjr_st)
+scalar p_val_P1_10_gjr_st = 1 - cdf(c, 1, LR_P1_10_gjr_st)
+
+
+# === Sous-periode 2 (626 - 750) ===
+
+smpl 626 750 --quiet
+
+# Variable binaire si hit
+series Hit_P2_1_gjr_st = (Loss > VaR_gjr_st_1pct)
+series Hit_P2_5_gjr_st = (Loss > VaR_gjr_st_5pct)
+series Hit_P2_10_gjr_st = (Loss > VaR_gjr_st_10pct)
+
+# Calcul du nombre d'exceptions
+scalar nb_hits_P2_1_gjr_st = sum(Hit_P2_1_gjr_st)
+scalar nb_hits_P2_5_gjr_st = sum(Hit_P2_5_gjr_st)
+scalar nb_hits_P2_10_gjr_st = sum(Hit_P2_10_gjr_st)
+
+# Taux empirique
+scalar p_hat_P2_1_gjr_st = nb_hits_P2_1_gjr_st / N_sub
+scalar p_hat_P2_5_gjr_st = nb_hits_P2_5_gjr_st / N_sub
+scalar p_hat_P2_10_gjr_st = nb_hits_P2_10_gjr_st / N_sub
+
+# Calcul LR et p-value pour P2
+scalar LR_P2_1_gjr_st = -2 * ln(((1-p_1)^(N_sub-nb_hits_P2_1_gjr_st) * p_1^nb_hits_P2_1_gjr_st) / ((1-p_hat_P2_1_gjr_st)^(N_sub-nb_hits_P2_1_gjr_st) * p_hat_P2_1_gjr_st^nb_hits_P2_1_gjr_st))
+scalar LR_P2_5_gjr_st = -2 * ln(((1-p_5)^(N_sub-nb_hits_P2_5_gjr_st) * p_5^nb_hits_P2_5_gjr_st) / ((1-p_hat_P2_5_gjr_st)^(N_sub-nb_hits_P2_5_gjr_st) * p_hat_P2_5_gjr_st^nb_hits_P2_5_gjr_st))
+scalar LR_P2_10_gjr_st = -2 * ln(((1-p_10)^(N_sub-nb_hits_P2_10_gjr_st) * p_10^nb_hits_P2_10_gjr_st) / ((1-p_hat_P2_10_gjr_st)^(N_sub-nb_hits_P2_10_gjr_st) * p_hat_P2_10_gjr_st^nb_hits_P2_10_gjr_st))
+
+scalar p_val_P2_1_gjr_st = 1 - cdf(c, 1, LR_P2_1_gjr_st)
+scalar p_val_P2_5_gjr_st = 1 - cdf(c, 1, LR_P2_5_gjr_st)
+scalar p_val_P2_10_gjr_st = 1 - cdf(c, 1, LR_P2_10_gjr_st)
+
+# === Affichage des tableaux de résultats ===
+
+
+matrix Tab_P1_gjr_st = { 1, nb_hits_P1_1_gjr_st, p_hat_P1_1_gjr_st, p_val_P1_1_gjr_st ;
+                         5, nb_hits_P1_5_gjr_st, p_hat_P1_5_gjr_st, p_val_P1_5_gjr_st ;
+                        10, nb_hits_P1_10_gjr_st, p_hat_P1_10_gjr_st, p_val_P1_10_gjr_st }
+
+matrix Tab_P2_gjr_st = { 1, nb_hits_P2_1_gjr_st, p_hat_P2_1_gjr_st, p_val_P2_1_gjr_st ;
+                         5, nb_hits_P2_5_gjr_st, p_hat_P2_5_gjr_st, p_val_P2_5_gjr_st ;
+                        10, nb_hits_P2_10_gjr_st, p_hat_P2_10_gjr_st, p_val_P2_10_gjr_st }
+
+# Mise en page
+rownames(Tab_P1_gjr_st, "GJR_ST_1% GJR_ST_5% GJR_ST_10%")
+colnames(Tab_P1_gjr_st, "Alpha #hits Taux_hits p-value")
+rownames(Tab_P2_gjr_st, "GJR_ST_1% GJR_ST_5% GJR_ST_10%")
+colnames(Tab_P2_gjr_st, "Alpha #hits Taux_hits p-value")
+
+print "--- ROBUSTESSE GJR-GARCH STUDENT : Période 1 (Jours 501 à 625) ---"
+print Tab_P1_gjr_st
+
+print "--- ROBUSTESSE GJR-GARCH STUDENT : Période 2 (Jours 626 à 750) ---"
+print Tab_P2_gjr_st
+
+smpl full
+
+# ============================================================
+# Generation des graphiques
+# ============================================================
+
+smpl 501 750 --quiet
+
+#Graphique G1 - Pertes realisees et VAR
+gnuplot Loss VaR_EWMA_1 VaR_HS_1 --time-series --with-lines --output=display \
+  { set title 'Figure 1 - Pertes realisees et VaR (hors-echantillon)'; \
+    set ylabel 'Perte'; \
+  set key top right; }
+
+#Graphique G2 - VAR vs ES (EWMA)
+gnuplot VaR_EWMA_1 ES_EWMA_1 --time-series --with-lines --output=display \
+  { set title 'Figure 2 - VaR (seuil) vs ES (moyenne en queue) - EWMA 99%'; \
+    set ylabel 'Perte'; \
+    set key top right; }
+
+smpl full
+
+
+# Graphique G3 - Volatilite conditionnelle (GARCH vs EWMA)
+
+smpl full 
+
+# 1. Calcul de la volatilité sur tout l'échantillon (en %)
+series sigma_garch_full = sqrt(var_cond_garch) * 100
+series sigma_ewma_pct = sigma * 100
+
+# 2. Initialisation des 4 series avec des valeurs manquantes (NA)
+series EWMA_in = NA
+series GARCH_in = NA
+series EWMA_out = NA
+series GARCH_out = NA
+
+# 3. Remplissage pour donnees in-sample (estimées)
+smpl 1 500 --quiet
+EWMA_in = sigma_ewma_pct
+GARCH_in = sigma_garch_full
+
+# 4. Remplissage pour donnees hors-echantillon (prévues)
+smpl 501 750 --quiet
+EWMA_out = sigma_ewma_pct
+GARCH_out = sigma_garch_full
+
+# 5. Modification des noms pour la légende (très propre dans Gretl)
+setinfo EWMA_in -d "EWMA (In-Sample)"
+setinfo GARCH_in -d "GARCH(1,1) (In-Sample)"
+setinfo EWMA_out -d "EWMA (Out-of-Sample)"
+setinfo GARCH_out -d "GARCH(1,1) (Out-of-Sample)"
+
+# 6. Creation du graphique
+smpl full
+gnuplot EWMA_in GARCH_in EWMA_out GARCH_out --time-series --with-lines --output=display \
+  { set title 'Figure 3 - Volatilite conditionnelle : EWMA vs GARCH(1,1)'; \
+    set ylabel 'Volatilite conditionnelle (en %)'; \
+    set key top left; \
+    set linetype 1 lc rgb 'blue' lw 1.5; \
+    set linetype 2 lc rgb 'red' lw 1.5; \
+    set linetype 3 lc rgb 'blue' dt 2 lw 1.5; \
+    set linetype 4 lc rgb 'red' dt 2 lw 1.5; }
+
+#Graphique de violation 
+smpl 501 750 --quiet
+
+# Creation des series qui ne contiennent que les violations (sinon NA)
+series Viol_HS_1 = (Loss > VaR_HS_1) ? Loss : NA
+series Viol_EWMA_1 = (Loss > VaR_EWMA_1) ? Loss : NA
+series Viol_ARCH_1 = (Loss > VaR_arch_1pct) ? Loss : NA
+series Viol_GARCH_1 = (Loss > VaR_garch_1pct) ? Loss : NA
+series Viol_GARCH_ST_1 = (Loss > VaR_garch_st_1pct) ? Loss : NA
+series Viol_GJR_1 = (Loss > VaR_gjr_1pct) ? Loss : NA
+series Viol_GJR_ST_1 = (Loss > VaR_gjr_st_1pct) ? Loss : NA
+
+# Generation des 7 graphiques
+gnuplot Loss VaR_HS_1 Viol_HS_1 --time-series --output=display \
+  { set title 'VaR 1% et Violations - Simulation Historique'; set key top left; }
+
+gnuplot Loss VaR_EWMA_1 Viol_EWMA_1 --time-series --output=display \
+  { set title 'VaR 1% et Violations - EWMA'; set key top left; }
+
+gnuplot Loss VaR_arch_1pct Viol_ARCH_1 --time-series --output=display \
+  { set title 'VaR 1% et Violations - ARCH(1)'; set key top left; }
+
+gnuplot Loss VaR_garch_1pct Viol_GARCH_1 --time-series --output=display \
+  { set title 'VaR 1% et Violations - GARCH(1,1)'; set key top left; }
+
+gnuplot Loss VaR_garch_st_1pct Viol_GARCH_ST_1 --time-series --output=display \
+  { set title 'VaR 1% et Violations - GARCH Student'; set key top left; }
+
+gnuplot Loss VaR_gjr_1pct Viol_GJR_1 --time-series --output=display \
+  { set title 'VaR 1% et Violations - GJR-GARCH Normal'; set key top left; }
+
+gnuplot Loss VaR_gjr_st_1pct Viol_GJR_ST_1 --time-series --output=display \
+  { set title 'VaR 1% et Violations - GJR-GARCH Student'; set key top left; }
+
+smpl full
+
+# ============================================================
+# Tableau synthese
+# ============================================================
+
+# TABLE 2 : Synthese VaR/ES (Hors-echantillon) - Seuil 1%
+
+smpl 501 750 --quiet
+
+# Creation matrice avec variables necessaires
+matrix Table2_1pct = { \
+    1, mean(VaR_HS_1), mean(ES_HS_1), max(VaR_HS_1), max(ES_HS_1) ; \
+    1, mean(VaR_EWMA_1), mean(ES_EWMA_1), max(VaR_EWMA_1), max(ES_EWMA_1) ; \
+    1, mean(VaR_arch_1pct), mean(ES_arch_1pct), max(VaR_arch_1pct), max(ES_arch_1pct) ; \
+    1, mean(VaR_garch_1pct), mean(ES_garch_1pct), max(VaR_garch_1pct), max(ES_garch_1pct) ; \
+    1, mean(VaR_garch_st_1pct), mean(ES_garch_st_1pct), max(VaR_garch_st_1pct), max(ES_garch_st_1pct) ; \
+    1, mean(VaR_gjr_1pct), mean(ES_gjr_1pct), max(VaR_gjr_1pct), max(ES_gjr_1pct) ; \
+    1, mean(VaR_gjr_st_1pct), mean(ES_gjr_st_1pct), max(VaR_gjr_st_1pct), max(ES_gjr_st_1pct) }
+
+# Modification du nom lignes/colonnes
+rownames(Table2_1pct, "Hist.(250) EWMA ARCH(1) GARCH(1,1) GARCH-Student GJR-Normal GJR-Student")
+colnames(Table2_1pct, "Alpha Moy_VaR Moy_ES Max_VaR Max_ES")
+
+print "--- TABLE 2 - Synthese VaR/ES (1%) ---"
+print Table2_1pct
+
+smpl full 
+
+# TABLE 3 : Backtesting VaR - Seuil 1%
+
+# Creation de la matrice avec infos demandees
+matrix Table3_1pct = { \
+    1, nb_hits_1_rw, p_hat_1_rw, LR_uc_1_rw, p_value_kupiec_1_rw ; \
+    1, nb_hits_1_ewma, p_hat_1_ewma, LR_uc_1_ewma, p_value_kupiec_1_ewma ; \
+    1, nb_hits_1_arch, p_hat_1_arch, LR_uc_1_arch, p_value_kupiec_1_arch ; \
+    1, nb_hits_1_garch, p_hat_1_garch, LR_uc_1_garch, p_value_kupiec_1_garch ; \
+    1, nb_hits_1_garch_st, p_hat_1_garch_st, LR_uc_1_garch_st, p_value_kupiec_1_garch_st ; \
+    1, nb_hits_1_gjr, p_hat_1_gjr, LR_uc_1_gjr, p_value_kupiec_1_gjr ; \
+    1, nb_hits_1_gjr_st, p_hat_1_gjr_st, LR_uc_1_gjr_st, p_value_kupiec_1_gjr_st }
+
+# Modification du nom lignes/colonnes
+rownames(Table3_1pct, "Hist.(250) EWMA ARCH(1) GARCH(1,1) GARCH-Student GJR-Normal GJR-Student")
+colnames(Table3_1pct, "Alpha #hits Taux_hits LR_uc p-value")
+
+print "--- TABLE 3 - Backtesting VaR (1%) ---"
+print Table3_1pct
+
+smpl full
+
+matrix Tab_Synthese_Globale = { \
+    nb_hits_1_rw, p_hat_1_rw, p_value_kupiec_1_rw, ES_obs_1_rw, ES_pred_1_rw ; \
+    nb_hits_1_ewma, p_hat_1_ewma, p_value_kupiec_1_ewma, ES_obs_1_ewma, ES_pred_1_ewma ; \
+    nb_hits_1_arch, p_hat_1_arch, p_value_kupiec_1_arch, ES_obs_1_arch, ES_pred_1_arch ; \
+    nb_hits_1_garch, p_hat_1_garch, p_value_kupiec_1_garch, ES_obs_1_garch, ES_pred_1_garch ; \
+    nb_hits_1_garch_st, p_hat_1_garch_st, p_value_kupiec_1_garch_st, ES_obs_1_garch_st, ES_pred_1_garch_st ; \
+    nb_hits_1_gjr, p_hat_1_gjr, p_value_kupiec_1_gjr, ES_obs_1_gjr, ES_pred_1_gjr ; \
+    nb_hits_1_gjr_st, p_hat_1_gjr_st, p_value_kupiec_1_gjr_st, ES_obs_1_gjr_st, ES_pred_1_gjr_st }
+
+rownames(Tab_Synthese_Globale, "Hist.(250) EWMA ARCH(1) GARCH(1,1) GARCH-Student GJR-Normal GJR-Student")
+colnames(Tab_Synthese_Globale, "#Hits Taux_hits p-value ES_obs ES_pred")
+
+print "--- Tableau de synthese des 7 MODELES (Seuil Alpha = 1%) ---"
+print Tab_Synthese_Globale
+
+# ============================================================
+# SYNTHESE GLOBALE : ROBUSTESSE (Seuil Alpha = 1%)
+# ============================================================
+
+# Creation de la matrice de synthese pour la robustesse (P1 vs P2)
+matrix Tab_Synthese_Robustesse = { \
+    nb_hits_P1_1_rw, p_hat_P1_1_rw, p_val_P1_1_rw, nb_hits_P2_1_rw, p_hat_P2_1_rw, p_val_P2_1_rw ; \
+    nb_hits_P1_1_ewma, p_hat_P1_1_ewma, p_val_P1_1_ewma, nb_hits_P2_1_ewma, p_hat_P2_1_ewma, p_val_P2_1_ewma ; \
+    nb_hits_P1_1_arch, p_hat_P1_1_arch, p_val_P1_1_arch, nb_hits_P2_1_arch, p_hat_P2_1_arch, p_val_P2_1_arch ; \
+    nb_hits_P1_1_garch, p_hat_P1_1_garch, p_val_P1_1_garch, nb_hits_P2_1_garch, p_hat_P2_1_garch, p_val_P2_1_garch ; \
+    nb_hits_P1_1_garch_st, p_hat_P1_1_garch_st, p_val_P1_1_garch_st, nb_hits_P2_1_garch_st, p_hat_P2_1_garch_st, p_val_P2_1_garch_st ; \
+    nb_hits_P1_1_gjr, p_hat_P1_1_gjr, p_val_P1_1_gjr, nb_hits_P2_1_gjr, p_hat_P2_1_gjr, p_val_P2_1_gjr ; \
+    nb_hits_P1_1_gjr_st, p_hat_P1_1_gjr_st, p_val_P1_1_gjr_st, nb_hits_P2_1_gjr_st, p_hat_P2_1_gjr_st, p_val_P2_1_gjr_st }
+
+# Mise en page du tableau
+rownames(Tab_Synthese_Robustesse, "Hist.(250) EWMA ARCH(1) GARCH(1,1) GARCH-Student GJR-Normal GJR-Student")
+colnames(Tab_Synthese_Robustesse, "Hits_P1 Taux_P1 p-val_P1 Hits_P2 Taux_P2 p-val_P2")
+
+print Tab_Synthese_Robustesse
